@@ -136,6 +136,10 @@ import {
     deleteXrayForDiagnostic,
     updatePackageForDiagnostic,
     deletePackageForDiagnostic,
+    updateHraQuestion,
+    deleteHraQuestion,
+    updateMeetingLink,
+    bulkUploadStaffProfiles,
 } from '../Controller/ControllerAdmin.js';
 import multer from 'multer';
 import { uploadBlogImage, uploadCategoryCSV, uploadCategoryImage, uploadCompanyCSV, uploadDiagnosticImage, uploadImages, uploadPackageCSV, uploadPrescriptionFile, uploadReportFile, uploadTestCSV, uploadTestImage, uploadXrayCSV, uploadXrayImage } from '../config/multerConfig.js';
@@ -174,6 +178,7 @@ router.get('/gettest/:id', getDoctorTestsById);
 // Route to update doctor details
 // Route to create a new staff profile (admin only)
 router.post('/create-staff/:companyId', createStaffProfile);
+router.post('/create-staffinbulk/:companyId', bulkUploadStaffProfiles);
 router.post('/addamount/:staffId/:companyId', addAmountToWallet);
 
 
@@ -209,7 +214,7 @@ router.get('/doctorfilter', getAllDoctorsFilter);
 router.get('/single-doctor/:id', getDoctorById);
 
 // Update
-router.put('/update-doctorss/:id', updateDoctor);
+router.put('/update-doctor/:id', updateDoctor);
 router.put('/update-doctors/:doctorId', updateDoctors);
 router.put('/delete-slot/:doctorId', deleteSlotFromDoctor);
 router.put('/add-slot/:doctorId', addSlotToDoctor);
@@ -357,6 +362,8 @@ router.put('/updatehra/:hraId', updateHra);
 router.delete('/deletehra/:hraId', deleteHra);
 router.get('/allhracat', getAllHra);
 router.post('/create-multiplehra', createMultipleHraQuestions);
+router.put('/updatehra-question/:id', updateHraQuestion);
+router.delete('/deletehra-question/:id', deleteHraQuestion);
 router.get('/hra-questions', getAllHraQuestions);
 router.post('/create-blog', uploadBlogImage, createBlog);
 router.post('/create-doctor-booking', createDoctorConsultationBookingByAdmin);
@@ -384,10 +391,11 @@ router.get('/cities', getCities);
 router.put("/updatepackage/:packageId", updatePackage);
 router.delete("/deletepackage/:packageId", deletePackage);
 router.post('/upload-test-csv', uploadTestCSV, bulkUploadTestsFromCSV);
-router.post('/upload-testcsv', uploadTestCSV, bulkUploadTestsFromCSVForDiag);
-router.post('/upload-pkgcsv', uploadPackageCSV, bulkUploadPackagesFromCSV);
+router.post('/upload-testcsv/:diagnosticId', uploadTestCSV, bulkUploadTestsFromCSVForDiag);
+router.post('/upload-pkgcsv/:diagnosticId', uploadPackageCSV, bulkUploadPackagesFromCSV);
 
-router.post('/upload-xray-csv', uploadXrayCSV, importXrayCSV);
+router.post('/upload-xray-csv/:diagnosticId', uploadXrayCSV, importXrayCSV);
+router.put('/updatemeetinglink/:id', updateMeetingLink);
 
 
 

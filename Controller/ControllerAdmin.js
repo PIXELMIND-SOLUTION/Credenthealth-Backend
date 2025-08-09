@@ -1331,7 +1331,6 @@ export const addSlotToDoctor = async (req, res) => {
 
 
 
-// Get all doctors filtered by category
 export const getAllDoctors = async (req, res) => {
   try {
     const { categories } = req.query;
@@ -1343,14 +1342,52 @@ export const getAllDoctors = async (req, res) => {
       filter.category = { $in: categories.split(',') };
     }
 
-    const doctors = await Doctor.find(filter)
-      .sort({ createdAt: -1 }); // 🔽 Sort latest doctors first
+    const doctors = await Doctor.find(filter).sort({ createdAt: -1 });
 
-    if (doctors.length === 0) {
+    if (!doctors.length) {
       return res.status(404).json({ message: 'No doctors found for the selected category' });
     }
 
-    res.status(200).json(doctors);
+    const now = moment();
+
+    const normalizeTimeSlot = (timeSlot) => {
+      if (!timeSlot) return '';
+      const trimmed = timeSlot.trim().toUpperCase();
+
+      // If it's purely numeric with colon and ends with AM/PM, add space
+      if (/^\d{1,2}:\d{2}[AP]M$/.test(trimmed)) {
+        return trimmed.replace(/([0-9])([AP]M)$/, '$1 $2');
+      }
+
+      return trimmed;
+    };
+
+    const filterFutureSlots = (slots) => {
+      return (slots || []).filter(slot => {
+        const time = normalizeTimeSlot(slot.timeSlot);
+        const dateTime = moment(`${slot.date} ${time}`, [
+          'YYYY-MM-DD HH:mm',
+          'YYYY-MM-DD H:mm',
+          'YYYY-MM-DD h:mm A',
+          'YYYY-MM-DD h:mmA',     // fallback
+          'YYYY-MM-DD h:mm A'
+        ]);
+
+        return dateTime.isValid() && dateTime.isSameOrAfter(now);
+      });
+    };
+
+    const filteredDoctors = doctors.map(doctor => {
+      const docObj = doctor.toObject();
+
+      return {
+        ...docObj,
+        onlineSlots: filterFutureSlots(docObj.onlineSlots),
+        offlineSlots: filterFutureSlots(docObj.offlineSlots),
+      };
+    });
+
+    res.status(200).json(filteredDoctors);
 
   } catch (error) {
     console.error('Error fetching doctors:', error);
@@ -1359,20 +1396,34 @@ export const getAllDoctors = async (req, res) => {
 };
 
 
-
 // Get doctor by ID and populate myBlogs
 export const getDoctorById = async (req, res) => {
   try {
-    const doctor = await Doctor.findById(req.params.id).populate("myBlogs");
+    const doctor = await Doctor.findById(req.params.id).populate('myBlogs');
     if (!doctor) return res.status(404).json({ message: 'Doctor not found' });
 
-    res.status(200).json(doctor);
+    const now = moment();
+
+    // Helper to filter future slots
+    const filterFutureSlots = (slots) => {
+      return slots.filter(slot => {
+        const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, ['YYYY-MM-DD HH:mm', 'YYYY-MM-DD h:mm A', 'YYYY-MM-DD H:mm']);
+        return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
+      });
+    };
+
+    const filteredDoctor = {
+      ...doctor.toObject(),
+      onlineSlots: filterFutureSlots(doctor.onlineSlots),
+      offlineSlots: filterFutureSlots(doctor.offlineSlots)
+    };
+
+    res.status(200).json(filteredDoctor);
   } catch (error) {
     console.error('Error fetching doctor:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
-
 
 
 export const getDoctorSlotsByDate = async (req, res) => {
@@ -1390,6 +1441,7 @@ export const getDoctorSlotsByDate = async (req, res) => {
     }
 
     const formattedDate = moment(date, "YYYY-MM-DD").format("YYYY-MM-DD");
+    const now = moment();
 
     let slots = [];
 
@@ -1398,26 +1450,37 @@ export const getDoctorSlotsByDate = async (req, res) => {
     } else if (type === "offline") {
       slots = doctor.offlineSlots || [];
     } else {
-      // If type is not specified, combine both
       slots = [...(doctor.onlineSlots || []), ...(doctor.offlineSlots || [])];
     }
 
-    const matchingSlots = slots.filter(slot => {
-      const slotDate = moment(slot.date).format("YYYY-MM-DD");
-      return slotDate === formattedDate;
-    });
+    // ✅ Filter + convert each slot to plain JS object + add isExpired
+    const filteredSlots = (slots || [])
+      .filter(slot => slot.date === formattedDate)
+      .map(slotDoc => {
+        const slot = typeof slotDoc.toObject === 'function' ? slotDoc.toObject() : slotDoc;
+        const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
+          "YYYY-MM-DD HH:mm",
+          "YYYY-MM-DD H:mm",
+          "YYYY-MM-DD h:mm A"
+        ]);
 
-    if (matchingSlots.length === 0) {
+        return {
+          ...slot,
+          isExpired: !slotDateTime.isValid() || slotDateTime.isBefore(now)
+        };
+      });
+
+    if (filteredSlots.length === 0) {
       const availableDates = slots.map(slot => slot.date).filter(Boolean);
       return res.status(404).json({
-        message: "No slots found for the given date",
+        message: "No valid slots found for the given date",
         availableDates: availableDates.length > 0 ? availableDates : ["No available dates found"]
       });
     }
 
     return res.status(200).json({
       date: formattedDate,
-      slots: matchingSlots
+      slots: filteredSlots
     });
 
   } catch (error) {
@@ -1425,7 +1488,6 @@ export const getDoctorSlotsByDate = async (req, res) => {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 
 export const updateDoctor = async (req, res) => {
   try {
@@ -1547,7 +1609,12 @@ export const getAllDiagnosticBookings = async (req, res) => {
 
 export const getAllDiagnosticBookingsForAdmin = async (req, res) => {
   try {
-    const bookings = await Booking.find({ diagnosticBookingId: { $exists: true } }) // only diagnostic bookings
+    const bookings = await Booking.find({
+      $or: [
+        { diagnosticBookingId: { $exists: true } },
+        { packageId: { $exists: true } }
+      ]
+    })
       .populate({
         path: 'staffId',
         select: 'name'
@@ -1561,39 +1628,44 @@ export const getAllDiagnosticBookingsForAdmin = async (req, res) => {
         select: 'name age gender'
       })
       .select(
-        'diagnosticBookingId diagnosticId staffId familyMemberId date timeSlot serviceType totalPrice discount payableAmount status report_file diagPrescription createdAt'
+        'diagnosticBookingId packageId diagnosticId staffId familyMemberId date timeSlot serviceType totalPrice discount payableAmount status report_file diagPrescription createdAt'
       )
-      .sort({ createdAt: -1 }); // 🆕 Sort by latest first
+      .sort({ createdAt: -1 });
 
-    res.status(200).json({
-      message: 'All diagnostic appointments fetched successfully',
-      appointments: bookings.map((booking) => ({
-        appointmentId: booking._id,
-        diagnosticBookingId: booking.diagnosticBookingId,
-        diagnostic_name: booking.diagnosticId?.name || '',
-        diagnostic_image: booking.diagnosticId?.image || '',
-        diagnostic_address: booking.diagnosticId?.address || '',
-        staff_name: booking.staffId?.name || '',
-        family_member: {
-          name: booking.familyMemberId?.name || '',
-          age: booking.familyMemberId?.age || '',
-          gender: booking.familyMemberId?.gender || ''
-        },
-        service_type: booking.serviceType,
-        appointment_date: booking.date,
-        time_slot: booking.timeSlot,
-        total_price: booking.totalPrice,
-        discount: booking.discount,
-        payable_amount: booking.payableAmount,
-        status: booking.status,
-        report_file: booking.report_file,
-        diagPrescription: booking.diagPrescription,
-        createdAt: booking.createdAt
-      }))
+    const formattedAppointments = bookings.map((booking) => ({
+      appointmentId: booking._id,
+      diagnosticBookingId: booking.diagnosticBookingId || null,
+      packageId: booking.packageId || null,
+      diagnosticId: booking.diagnosticId?._id || null, // ✅ Show the diagnostic center ID
+      diagnostic_name: booking.diagnosticId?.name || '',
+      diagnostic_image: booking.diagnosticId?.image || '',
+      diagnostic_address: booking.diagnosticId?.address || '',
+      staff_name: booking.staffId?.name || '',
+      family_member: {
+        name: booking.familyMemberId?.name || '',
+        age: booking.familyMemberId?.age || '',
+        gender: booking.familyMemberId?.gender || ''
+      },
+      service_type: booking.serviceType,
+      appointment_date: booking.date,
+      time_slot: booking.timeSlot === "null" ? null : booking.timeSlot,
+      total_price: booking.totalPrice,
+      discount: booking.discount,
+      payable_amount: booking.payableAmount,
+      status: booking.status,
+      report_file: booking.report_file,
+      diagPrescription: booking.diagPrescription,
+      createdAt: booking.createdAt
+    }));
+
+    return res.status(200).json({
+      message: 'All diagnostic & package appointments fetched successfully',
+      appointments: formattedAppointments
     });
+
   } catch (error) {
-    console.error('Error fetching diagnostic appointments:', error);
-    res.status(500).json({
+    console.error('❌ Error fetching diagnostic/package appointments:', error);
+    return res.status(500).json({
       message: 'Server error',
       error: error.message
     });
@@ -1878,11 +1950,14 @@ export const getAllDoctorAppointments = async (req, res) => {
         select: 'name'
       })
       .select('doctorId staffId familyMemberId bookedSlot totalPrice status meetingLink type discount payableAmount createdAt doctorConsultationBookingId')
-      .sort({ createdAt: -1 }); // 🔽 Sort by latest created
+      .sort({ createdAt: -1 });
+
+    // ✅ Filter out bookings with null doctorId
+    const validBookings = bookings.filter(b => b.doctorId);
 
     res.status(200).json({
       message: 'All doctor consultations fetched successfully',
-      appointments: bookings.map((booking) => ({
+      appointments: validBookings.map((booking) => ({
         appointmentId: booking._id,
         doctor_name: booking.doctorId?.name,
         doctor_specialization: booking.doctorId?.specialization,
@@ -2749,20 +2824,30 @@ export const getCompanyWithStaff = async (req, res) => {
 // Create a new category with optional image
 export const createCategory = async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, type } = req.body; // type = 'special' or 'normal'
 
-    // Check if category already exists
+    if (!name || !type) {
+      return res.status(400).json({ message: 'Name and type are required.' });
+    }
 
-    // Image path from multer
+    // Validate type
+    if (!['special', 'normal'].includes(type.toLowerCase())) {
+      return res.status(400).json({ message: 'Invalid category type. Must be "special" or "normal".' });
+    }
+
+    // For normal category, image is required
     let imagePath = '';
-    if (req.file) {
+    if (type === 'normal') {
+      if (!req.file) {
+        return res.status(400).json({ message: 'Image is required for normal category.' });
+      }
       imagePath = `/uploads/category-images/${req.file.filename}`;
     }
 
-    // Create and save category
     const category = new Category({
       name,
       image: imagePath,
+      type: type.toLowerCase(), // Save lowercase for consistency
     });
 
     await category.save();
@@ -4835,7 +4920,7 @@ export const createDiagnostic = async (req, res) => {
         // Add x-ray image to the scans if present
         if (xrayImage) {
           parsedScans.forEach(scan => {
-            scan.xrayImage = xrayImage; // Link the X-ray image to the scan (can be any scan, not just "Chest X-Ray")
+            scan.image = xrayImage; // Link the X-ray image to the scan (can be any scan, not just "Chest X-Ray")
           });
         }
 
@@ -5026,9 +5111,33 @@ export const getAllDiagnostics = async (req, res) => {
       .populate("packages")
       .populate("scans");
 
+    const now = moment();
+
+    // Function to filter future slots
+    const filterFutureSlots = (slots) => {
+      return (slots || []).filter(slot => {
+        const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
+          'YYYY-MM-DD HH:mm',
+          'YYYY-MM-DD H:mm',
+          'YYYY-MM-DD h:mm A'
+        ]);
+        return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
+      });
+    };
+
+    // Map through each diagnostic and add filtered slots
+    const filteredDiagnostics = diagnostics.map(diagnostic => {
+      const diagnosticObj = diagnostic.toObject();
+      return {
+        ...diagnosticObj,
+        homeCollectionSlots: filterFutureSlots(diagnosticObj.homeCollectionSlots),
+        centerVisitSlots: filterFutureSlots(diagnosticObj.centerVisitSlots),
+      };
+    });
+
     res.status(200).json({
       message: "Diagnostics fetched successfully",
-      data: diagnostics,
+      data: filteredDiagnostics,
     });
   } catch (error) {
     console.error("❌ Error fetching diagnostics:", error);
@@ -5044,7 +5153,6 @@ export const getDiagnosticById = async (req, res) => {
   try {
     const { diagnosticId } = req.params;
 
-    // Validate ObjectId format first
     if (!mongoose.Types.ObjectId.isValid(diagnosticId)) {
       return res.status(400).json({ message: "Invalid diagnostic ID format" });
     }
@@ -5053,24 +5161,46 @@ export const getDiagnosticById = async (req, res) => {
       .populate("tests")
       .populate("packages")
       .populate("scans")
-      .populate("contactPersons")        // If contactPersons is a referenced collection
-      .populate("homeCollectionSlots")  // If these are referenced schemas
-      .populate("centerVisitSlots");
+      .populate("contactPersons");
 
     if (!diagnostic) {
       return res.status(404).json({ message: "Diagnostic center not found" });
     }
 
+    const now = moment();
+
+    // Function to filter out past slots
+    const filterFutureSlots = (slots) => {
+      return slots.filter(slot => {
+        const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
+          'YYYY-MM-DD HH:mm',
+          'YYYY-MM-DD H:mm',
+          'YYYY-MM-DD h:mm A'
+        ]);
+        return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
+      });
+    };
+
+    // Filter homeCollectionSlots and centerVisitSlots
+    const filteredHomeSlots = filterFutureSlots(diagnostic.homeCollectionSlots || []);
+    const filteredCenterSlots = filterFutureSlots(diagnostic.centerVisitSlots || []);
+
+    const diagnosticData = {
+      ...diagnostic.toObject(),
+      homeCollectionSlots: filteredHomeSlots,
+      centerVisitSlots: filteredCenterSlots
+    };
+
     return res.status(200).json({
       message: "Diagnostic fetched successfully",
-      diagnostic,  // Key name can be 'diagnostic' or 'data' as per your convention
+      diagnostic: diagnosticData,
     });
+
   } catch (error) {
     console.error("❌ Error fetching diagnostic by ID:", error);
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 
 
 // 🧹 Delete diagnostic and its related data
@@ -5156,7 +5286,7 @@ export const uploadHraImage = (req, res) => {
     }
 
     try {
-      const { hraName } = req.body;
+      const { hraName, prescribed } = req.body;
 
       if (!hraName) {
         return res.status(400).json({ message: 'HRA name is required' });
@@ -5166,7 +5296,8 @@ export const uploadHraImage = (req, res) => {
 
       const newHra = new Hra({
         hraName,
-        hraImage, // This will be null if no image was uploaded
+        hraImage,
+        prescribed: prescribed || '', // set to empty string if not provided
       });
 
       await newHra.save();
@@ -5193,24 +5324,34 @@ export const updateHra = async (req, res) => {
 
     try {
       const { hraId } = req.params;
-      const { hraName } = req.body;
+      const { hraName, prescribed } = req.body;
 
       const hra = await Hra.findById(hraId);
       if (!hra) {
-        return res.status(404).json({ message: 'Hra not found' });
+        return res.status(404).json({ message: 'HRA not found' });
       }
 
-      hra.hraName = hraName || hra.hraName;
+      // Update name if provided
+      if (hraName) hra.hraName = hraName;
 
+      // Update prescribed if provided (string)
+      if (typeof prescribed !== 'undefined') {
+        hra.prescribed = prescribed;
+      }
+
+      // Update image if file uploaded
       if (req.file) {
         hra.hraImage = `/uploads/category-images/${req.file.filename}`;
       }
 
       await hra.save();
 
-      return res.status(200).json({ message: 'Hra updated successfully', hra });
+      return res.status(200).json({
+        message: 'HRA updated successfully',
+        hra,
+      });
     } catch (error) {
-      console.error('Error updating Hra:', error);
+      console.error('❌ Error updating HRA:', error);
       return res.status(500).json({ message: 'Server error', error: error.message });
     }
   });
@@ -5259,6 +5400,10 @@ export const getAllHra = async (req, res) => {
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
+
+
+
+
 
 
 
@@ -5368,6 +5513,72 @@ export const getAllHraQuestions = async (req, res) => {
     });
   }
 };
+
+
+
+// Update a single HRA question by ID
+export const updateHraQuestion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { hraCategoryName, questionText, options } = req.body;
+
+    // Validate options
+    for (let opt of options) {
+      if (!opt.text || typeof opt.point !== 'number') {
+        return res.status(400).json({ message: 'Each option must have text and point' });
+      }
+    }
+
+    // Find category to get hraCategoryId
+    const hraCategory = await Hra.findOne({ hraName: hraCategoryName });
+    if (!hraCategory) {
+      return res.status(400).json({ message: `No category found with name ${hraCategoryName}` });
+    }
+
+    // Update the question
+    const updatedQuestion = await HraQuestion.findByIdAndUpdate(
+      id,
+      {
+        hraCategoryId: hraCategory._id,
+        hraCategoryName,
+        question: questionText,
+        options,
+      },
+      { new: true } // return the updated doc
+    );
+
+    if (!updatedQuestion) {
+      return res.status(404).json({ message: 'HRA Question not found' });
+    }
+
+    res.status(200).json({
+      message: 'HRA Question updated successfully',
+      hraQuestion: updatedQuestion,
+    });
+  } catch (error) {
+    console.error('Error updating HRA Question:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+// Delete a single HRA question by ID
+export const deleteHraQuestion = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const deletedQuestion = await HraQuestion.findByIdAndDelete(id);
+
+    if (!deletedQuestion) {
+      return res.status(404).json({ message: 'HRA Question not found' });
+    }
+
+    res.status(200).json({ message: 'HRA Question deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting HRA Question:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
 
 
 
@@ -6202,55 +6413,92 @@ export const bulkUploadTestsFromCSV = async (req, res) => {
 // ✅ Bulk Upload Controller
 export const bulkUploadTestsFromCSVForDiag = async (req, res) => {
   try {
+    const { diagnosticId } = req.params;
+
+    if (!diagnosticId) {
+      return res.status(400).json({ message: 'Diagnostic ID is required in params' });
+    }
+
+    // ✅ Check if Diagnostic exists
+    const diagnosticExists = await Diagnostic.findById(diagnosticId);
+    if (!diagnosticExists) {
+      return res.status(404).json({ message: 'Diagnostic not found' });
+    }
+
     if (!req.file) {
       return res.status(400).json({ message: 'CSV file is required' });
     }
 
-    const filePath = req.file.path;
-    const csvData = await csv().fromFile(filePath);
+    const csvData = await csv().fromFile(req.file.path);
 
     const formattedTests = csvData
-      .filter((row) => row.name) // At least name is required
-      .map((row) => ({
-        name: row.name?.trim() || '',
+      .filter(row => row.name || row.test_name)
+      .map(row => ({
+        name: (row.name || row.test_name || '').trim(),
         description: row.description?.trim() || '',
         price: parseFloat(row.price) || 0,
-        offerPrice: parseFloat(row.offerPrice) || 0,
-        reportHour: row.reportHour?.trim() || '',
+        reportHour: row.reportHour ? parseInt(row.reportHour, 10) : undefined,
+        instruction: row.instruction?.trim() || '',
+        precaution: row.precaution?.trim() || '',
+        fastingRequired: row.fastingRequired?.toLowerCase() === 'true',
+        homeCollectionAvailable: row.homeCollectionAvailable?.toLowerCase() === 'true',
+        reportIn24Hrs: row.reportIn24Hrs?.toLowerCase() === 'true',
         image: row.image?.trim() || null,
+        category: row.category?.trim() || 'General',
+        diagnosticId,
       }));
 
     if (!formattedTests.length) {
-      return res.status(400).json({ message: 'No valid test entries found in CSV' });
+      return res.status(400).json({ message: 'No valid test entries found' });
     }
 
-    const inserted = await Test.insertMany(formattedTests);
+    // ✅ Insert tests
+    const insertedTests = await Test.insertMany(formattedTests);
+
+    // ✅ Update Diagnostic: push test _ids into tests array
+    const insertedIds = insertedTests.map(test => test._id);
+    await Diagnostic.findByIdAndUpdate(diagnosticId, {
+      $push: { tests: { $each: insertedIds } },
+    });
 
     res.status(201).json({
-      message: 'Tests uploaded successfully',
-      insertedCount: inserted.length,
-      data: inserted,
+      message: 'Tests uploaded and linked to diagnostic successfully',
+      insertedCount: insertedTests.length,
+      data: insertedTests,
     });
   } catch (error) {
-    console.error('❌ Error uploading test CSV:', error);
+    console.error('❌ Error uploading tests CSV:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
 
 
-
 export const bulkUploadPackagesFromCSV = async (req, res) => {
   try {
+    const { diagnosticId } = req.params;
+
+    if (!diagnosticId) {
+      return res.status(400).json({ message: 'Diagnostic ID is required in params' });
+    }
+
+    // ✅ Check if diagnostic exists
+    const diagnosticExists = await Diagnostic.findById(diagnosticId);
+    if (!diagnosticExists) {
+      return res.status(404).json({ message: 'Diagnostic not found' });
+    }
+
     if (!req.file) {
       return res.status(400).json({ message: 'CSV file is required' });
     }
 
+    // ✅ Parse CSV file
     const filePath = req.file.path;
     const csvData = await csv().fromFile(filePath);
 
+    // ✅ Format each package from CSV
     const formattedPackages = csvData
-      .filter((row) => row.name)
-      .map((row) => ({
+      .filter(row => row.name)
+      .map(row => ({
         name: row.name?.trim() || '',
         price: parseFloat(row.price) || 0,
         doctorInfo: row.doctorInfo?.trim() || '',
@@ -6258,27 +6506,52 @@ export const bulkUploadPackagesFromCSV = async (req, res) => {
         description: row.description?.trim() || '',
         precautions: row.precautions?.trim() || '',
         includedTests: row.includedTests
-          ? JSON.parse(row.includedTests)  // assuming it's a JSON stringified array
+          ? JSON.parse(row.includedTests) // should be a JSON stringified array
           : [],
+        diagnosticId,
       }));
 
-    const inserted = await Package.insertMany(formattedPackages);
+    if (formattedPackages.length === 0) {
+      return res.status(400).json({ message: 'No valid packages found in CSV' });
+    }
+
+    // ✅ Insert all packages
+    const insertedPackages = await Package.insertMany(formattedPackages);
+
+    // ✅ Get their IDs
+    const insertedIds = insertedPackages.map(pkg => pkg._id);
+
+    // ✅ Push those IDs into the diagnostic
+    await Diagnostic.findByIdAndUpdate(diagnosticId, {
+      $addToSet: { packages: { $each: insertedIds } }, // avoids duplicates
+    });
 
     res.status(201).json({
-      message: 'Packages uploaded successfully',
-      insertedCount: inserted.length,
-      data: inserted,
+      message: 'Packages uploaded and linked to Diagnostic successfully',
+      insertedCount: insertedPackages.length,
+      data: insertedPackages,
     });
   } catch (error) {
     console.error('❌ Error uploading package CSV:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({
+      message: 'Server error',
+      error: error.message,
+    });
   }
 };
 
 
 
+
+
 export const importXrayCSV = async (req, res) => {
   try {
+    const { diagnosticId } = req.params;
+
+    if (!diagnosticId) {
+      return res.status(400).json({ message: 'Diagnostic ID is required in params' });
+    }
+
     if (!req.file) {
       return res.status(400).json({ message: 'CSV file is required' });
     }
@@ -6287,17 +6560,170 @@ export const importXrayCSV = async (req, res) => {
 
     const xrayData = jsonArray.map(row => ({
       title: row.title?.trim(),
-      price: parseFloat(row.price),
-      preparation: row.preparation?.trim(),
-      reportTime: row.reportTime?.trim(),
-      image: row.image?.trim() || "", // optional
+      price: parseFloat(row.price) || 0,
+      preparation: row.preparation?.trim() || '',
+      reportTime: row.reportTime?.trim() || '',
+      image: row.image?.trim() || "",
+      diagnosticId,  // Add diagnosticId here for reference if needed
     }));
 
-    const result = await Xray.insertMany(xrayData);
-    res.status(200).json({ message: 'X-ray data imported successfully', inserted: result.length });
+    // Insert all Xray documents
+    const insertedXrays = await Xray.insertMany(xrayData);
+
+    // Extract inserted IDs
+    const insertedIds = insertedXrays.map(xray => xray._id);
+
+    // Push inserted Xray IDs into Diagnostic's scans array (avoid duplicates)
+    await Diagnostic.findByIdAndUpdate(diagnosticId, {
+      $addToSet: { scans: { $each: insertedIds } },
+    });
+
+    res.status(200).json({
+      message: 'X-ray data imported and linked to Diagnostic successfully',
+      insertedCount: insertedXrays.length,
+      data: insertedXrays,
+    });
   } catch (err) {
     console.error('Error importing X-ray CSV:', err);
-    res.status(500).json({ message: 'Failed to import X-ray data', error: err.message });
+    res.status(500).json({
+      message: 'Failed to import X-ray data',
+      error: err.message,
+    });
   }
 };
 
+
+export const updateMeetingLink = async (req, res) => {
+  const { id } = req.params;
+  const { meeting_link } = req.body;
+
+  if (!meeting_link || meeting_link.trim() === "") {
+    return res.status(400).json({ message: "Meeting link is required" });
+  }
+
+  try {
+    const appointment = await Booking.findById(id);
+    if (!appointment) {
+      return res.status(404).json({ message: "Appointment not found" });
+    }
+
+    appointment.meetingLink = meeting_link.trim();
+    await appointment.save();
+
+    res.status(200).json({
+      message: "Meeting link updated",
+      appointment,
+    });
+  } catch (error) {
+    console.error("❌ Error updating meeting link:", error);
+    res.status(500).json({
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+
+
+export const bulkUploadStaffProfiles = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const staffList = req.body.staff; // frontend should send { staff: [...] }
+
+    // 🔐 Validation
+    if (!Array.isArray(staffList) || staffList.length === 0) {
+      return res.status(400).json({ message: "Staff data array is required" });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(companyId)) {
+      return res.status(400).json({ message: "Invalid company ID format" });
+    }
+
+    const company = await Company.findById(companyId);
+    if (!company) {
+      return res.status(404).json({ message: "Company not found" });
+    }
+
+    const savedStaffs = [];
+    const failedEntries = [];
+
+    for (const staffData of staffList) {
+      try {
+        // 🔁 Destructure and clean input
+        const {
+          name,
+          email,
+          password,
+          contact_number,
+          address,
+          dob,
+          gender,
+          age,
+          department,
+          designation,
+          role
+        } = staffData;
+
+        // Create new staff
+        const newStaff = new Staff({
+          name,
+          email,
+          password,
+          contact_number,
+          address,
+          dob,
+          gender,
+          age,
+          department,
+          designation,
+          role: role || "User",
+          wallet_balance: 0
+        });
+
+        const saved = await newStaff.save();
+
+        // Prepare minimal staff object for company.staff array
+        const staffForCompany = {
+          _id: saved._id,
+          name: saved.name,
+          role: saved.role,
+          contact_number: saved.contact_number,
+          email: saved.email,
+          dob: saved.dob,
+          gender: saved.gender,
+          age: saved.age,
+          address: saved.address,
+          wallet_balance: saved.wallet_balance,
+          department: saved.department,
+          designation: saved.designation,
+        };
+
+        // Push into company's staff array
+        await Company.findByIdAndUpdate(companyId, {
+          $push: { staff: staffForCompany }
+        });
+
+        savedStaffs.push(saved);
+      } catch (err) {
+        console.error("Error saving staff:", err.message);
+        failedEntries.push({ email: staffData.email || "Unknown", error: err.message });
+      }
+    }
+
+   res.status(200).json({
+  message: "Bulk staff upload completed",
+  totalUploaded: savedStaffs.length,
+  totalFailed: failedEntries.length,
+  failedEntries,
+  savedStaffs  // <-- yeh add karo
+});
+
+
+  } catch (error) {
+    console.error("❌ Bulk staff upload error:", error);
+    res.status(500).json({
+      message: "Server error during bulk staff upload",
+      error: error.message,
+    });
+  }
+};

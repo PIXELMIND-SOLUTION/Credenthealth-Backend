@@ -1,0 +1,2 @@
+test_name,description,price,reportIn24Hrs,reportHour,instruction,fastingRequired,homeCollection
+Blood Sugar,Test for blood glucose levels,300,true,24,Fast for 8 hours before test,true,true

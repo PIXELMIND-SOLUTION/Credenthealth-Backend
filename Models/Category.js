@@ -13,6 +13,10 @@ const categorySchema = new mongoose.Schema(
     image: {
       type: String, // Store image URL or path
     },
+    type: {
+  type: String,
+  enum: ['special', 'normal'],
+},
   },
   {
     timestamps: true, // Automatically adds createdAt and updatedAt fields

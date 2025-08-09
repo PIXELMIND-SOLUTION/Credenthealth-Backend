@@ -80,6 +80,10 @@ const bookingSchema = new mongoose.Schema({
     type: Boolean,
     default: true,
   },
+   packageId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Package",
+  },
   couponCode: String,
   discount: Number,
   payableAmount: Number,
@@ -96,6 +100,12 @@ const bookingSchema = new mongoose.Schema({
     index: true,
   },
   diagnosticBookingId: {
+    type: String,
+    unique: true,
+    sparse: true, // ✅ makes it optional without collisions
+    index: true,
+  },
+    packageBookingId: {
     type: String,
     unique: true,
     sparse: true, // ✅ makes it optional without collisions

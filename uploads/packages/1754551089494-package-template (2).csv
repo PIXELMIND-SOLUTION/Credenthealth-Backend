@@ -1,0 +1,2 @@
+name,price,doctorInfo,totalTestsIncluded,description,precautions,includedTests
+"""Blood Package""",5000,"""Dr. John Doe, General Physician""",3,"""...long desc...""","""Please fast...""","[{""name"":""Complete Blood Picture/Count"",""subTestCount"":1,""subTests"":[]}, ... ]"

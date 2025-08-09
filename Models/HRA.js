@@ -7,6 +7,10 @@ const hraSchema = new mongoose.Schema({
   hraImage: {
     type: String,
   },
+  prescribed: {
+  type: String,
+  default: ''
+},
 }, { timestamps: true });
 
 const Hra = mongoose.model('Hra', hraSchema);

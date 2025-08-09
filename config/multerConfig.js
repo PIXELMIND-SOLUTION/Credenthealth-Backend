@@ -349,7 +349,7 @@ export const uploadTestCSV = multer({
 
 export const uploadPackageCSV = multer({
   storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, dirs.packageCsv), // e.g., 'uploads/packages'
+    destination: (req, file, cb) => cb(null, dirs.packageCsv),
     filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
   }),
   fileFilter: (req, file, cb) => {
@@ -359,8 +359,9 @@ export const uploadPackageCSV = multer({
       cb(new Error('Only CSV files are allowed'), false);
     }
   },
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
-}).single('file');
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB limit
+}).single('file'); // <-- this 'file' must match frontend FormData key
+
 
 
 

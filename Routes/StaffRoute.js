@@ -50,6 +50,9 @@ import { getWalletBalance,
   getRecentPackageBooking,
   getStaffNotifications,
   getSlotsByDiagnosticId,
+  getHraByStaff,
+  getDoctorSlotsByDate,
+  getSingleStaffTestPackage,
 
 
 
@@ -99,6 +102,7 @@ router.put('/updateissue/:staffId/:issueId', updateIssueStatus);
 router.get('/getdoctorappointment/:staffId', getDoctorAppointmentsForStaff);  // update existing
 router.get('/getalldiagbookings/:staffId', getAllDiagnosticBookingForStaff);  // update existing
 router.get('/stafftestpackages/:staffId', getStaffTestPackageById);
+router.get('/singlestafftestpackages/:staffId/:packageId', getSingleStaffTestPackage);
 router.get('/getPrescription/:staffId', getPrescription);
 router.post('/addpackages', addDiagnosticTestsToStaff);
 router.get('/getpackage-test/:staffId', getStaffPackages);
@@ -147,6 +151,8 @@ router.get('/download-report/:staffId/:bookingId', downloadReport);
 
 router.get("/recent-doctor-booking/:staffId", getRecentDoctorBooking);
 router.get("/recent-package-booking/:staffId", getRecentPackageBooking);
+router.get('/allhracat/:staffId', getHraByStaff);
+router.get("/doctor-slots/:doctorId", getDoctorSlotsByDate);
 
 
 

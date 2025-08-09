@@ -23,6 +23,12 @@ import ejs from 'ejs';
 import puppeteer from 'puppeteer';  // Import Puppeteer
 import Razorpay from "razorpay";
 import { v4 as uuidv4 } from "uuid";
+import Hra from "../Models/HRA.js";
+import dotenv from 'dotenv'
+import nodemailer from "nodemailer";
+
+
+dotenv.config();
 
 // Create __dirname for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -144,7 +150,7 @@ export const getWalletBalance = async (req, res) => {
 
     res.status(200).json({
       message: "Wallet balance and transaction history fetched successfully",
-      wallet_balance: calculatedWalletBalance,
+      wallet_balance: staff.wallet_balance,
       total_credit: totalCredit,
       total_debit: totalDebit,
       forTests: staff.forTests || 0,
@@ -1275,6 +1281,71 @@ export const getStaffTestPackageById = async (req, res) => {
 };
 
 
+export const getSingleStaffTestPackage = async (req, res) => {
+  const { staffId, packageId } = req.params;
+
+  try {
+    const staffMember = await Staff.findById(staffId)
+      .populate({
+        path: 'myPackages.diagnosticId',
+        model: 'Diagnostic',
+        select: 'name address centerType email phone',
+      })
+      .populate({
+        path: 'myPackages.packageId',
+        model: 'Package',
+      })
+      .lean();
+
+    if (!staffMember) {
+      return res.status(404).json({ message: 'Staff member not found.' });
+    }
+
+    const pkg = staffMember.myPackages.find(
+      (p) => String(p.packageId?._id || p.packageId) === packageId
+    );
+
+    if (!pkg) {
+      return res.status(404).json({ message: 'Package not found for this staff member.' });
+    }
+
+    const diagnostic = pkg.diagnosticId || {};
+    const fullPackage = pkg.packageId || {};
+
+    const expandedPackage = {
+      _id: pkg._id,
+      packageId: fullPackage._id || pkg.packageId,
+      packageName: fullPackage.name || pkg.packageName || '',
+      price: pkg.price || fullPackage.price || 0,
+      offerPrice: pkg.offerPrice || 0,
+      doctorInfo: fullPackage.doctorInfo || '',
+      totalTestsIncluded: fullPackage.totalTestsIncluded || 0,
+      description: fullPackage.description || '',
+      precautions: fullPackage.precautions || '',
+      includedTests: fullPackage.includedTests || [],
+      tests: pkg.tests || [],
+      diagnosticCenter: {
+        name: diagnostic?.name || '',
+        address: diagnostic?.address || '',
+        email: diagnostic?.email || '',
+        phone: diagnostic?.phone || '',
+        centerType: diagnostic?.centerType || '',
+      }
+    };
+
+    res.status(200).json({
+      message: '✅ Single package fetched successfully.',
+      package: expandedPackage
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching package:', error);
+    res.status(500).json({ message: 'Server error while fetching package.' });
+  }
+};
+
+
+
 const pdfsDirectory = path.join(process.cwd(), 'pdfs');
 
 // Ensure PDF directory exists
@@ -1987,7 +2058,7 @@ export const removeFromCart = async (req, res) => {
 
 
 
-// Utility to generate formatted Booking ID
+// Utility to generate formatted Diagnostic Booking ID
 const generateDiagnosticBookingId = async () => {
   const lastBooking = await Booking.findOne({})
     .sort({ createdAt: -1 })
@@ -2001,6 +2072,22 @@ const generateDiagnosticBookingId = async () => {
   const newId = (lastId + 1).toString().padStart(4, "0");
   return `DIA-${newId}`;
 };
+
+// Utility to generate formatted Package Booking ID
+const generatePackageBookingId = async () => {
+  const lastBooking = await Booking.findOne({})
+    .sort({ createdAt: -1 })
+    .select("packageBookingId");
+
+  if (!lastBooking || !lastBooking.packageBookingId) {
+    return "PKG-0001";
+  }
+
+  const lastId = parseInt(lastBooking.packageBookingId.split("-")[1]);
+  const newId = (lastId + 1).toString().padStart(4, "0");
+  return `PKG-${newId}`;
+};
+
 
 
 
@@ -2262,16 +2349,16 @@ export const myBookings = async (req, res) => {
         // ✅ Populate cart items
         const populatedItems = booking.cartId?.items?.length
           ? await Promise.all(
-              booking.cartId.items.map(async (item) => {
-                let details = null;
-                if (item.type === "xray") {
-                  details = await Xray.findById(item.itemId).lean();
-                } else if (item.type === "test") {
-                  details = await Test.findById(item.itemId).lean();
-                }
-                return { ...item, itemDetails: details || null };
-              })
-            )
+            booking.cartId.items.map(async (item) => {
+              let details = null;
+              if (item.type === "xray") {
+                details = await Xray.findById(item.itemId).lean();
+              } else if (item.type === "test") {
+                details = await Test.findById(item.itemId).lean();
+              }
+              return { ...item, itemDetails: details || null };
+            })
+          )
           : [];
 
         return {
@@ -2279,15 +2366,15 @@ export const myBookings = async (req, res) => {
           serviceType: booking.serviceType || "",
           type: booking.type || "",
           meetingLink: booking.meetingLink || null,
- bookedSlot: booking.bookedSlot
-    ? {
-        ...booking.bookedSlot,
-        date: booking.bookedSlot.date
-          ? new Date(booking.bookedSlot.date).toISOString().split('T')[0]
-          : null,
-      }
-    : null,          
-    status: booking.status,
+          bookedSlot: booking.bookedSlot
+            ? {
+              ...booking.bookedSlot,
+              date: booking.bookedSlot.date
+                ? new Date(booking.bookedSlot.date).toISOString().split('T')[0]
+                : null,
+            }
+            : null,
+          status: booking.status,
           date: formattedDate || null,
           timeSlot: booking.timeSlot,
           totalPrice: booking.totalPrice,
@@ -2298,36 +2385,36 @@ export const myBookings = async (req, res) => {
 
           diagnostic: booking.diagnosticId
             ? {
-                name: booking.diagnosticId.name,
-                description: booking.diagnosticId.description,
-                image: booking.diagnosticId.image,
-                distance: booking.diagnosticId.distance,
-                homeCollection: booking.diagnosticId.homeCollection,
-                centerVisit: booking.diagnosticId.centerVisit,
-                address: booking.diagnosticId.address,
-              }
+              name: booking.diagnosticId.name,
+              description: booking.diagnosticId.description,
+              image: booking.diagnosticId.image,
+              distance: booking.diagnosticId.distance,
+              homeCollection: booking.diagnosticId.homeCollection,
+              centerVisit: booking.diagnosticId.centerVisit,
+              address: booking.diagnosticId.address,
+            }
             : null,
 
           package: booking.packageId || null,
 
           patient: familyMember
             ? {
-                name: familyMember.fullName,
-                age: familyMember.age,
-                gender: familyMember.gender,
-                relation: familyMember.relation,
-              }
+              name: familyMember.fullName,
+              age: familyMember.age,
+              gender: familyMember.gender,
+              relation: familyMember.relation,
+            }
             : null,
 
           doctor: booking.doctorId
             ? {
-                name: booking.doctorId.name,
-                email: booking.doctorId.email,
-                image: booking.doctorId.image,
-                specialization: booking.doctorId.specialization,
-                qualification: booking.doctorId.qualification,
-                address: booking.doctorId.address,
-              }
+              name: booking.doctorId.name,
+              email: booking.doctorId.email,
+              image: booking.doctorId.image,
+              specialization: booking.doctorId.specialization,
+              qualification: booking.doctorId.qualification,
+              address: booking.doctorId.address,
+            }
             : null,
 
           staff: {
@@ -2530,6 +2617,9 @@ export const downloadReport = async (req, res) => {
   }
 };
 
+
+
+
 export const createPackageBooking = async (req, res) => {
   try {
     const { staffId } = req.params;
@@ -2561,7 +2651,6 @@ export const createPackageBooking = async (req, res) => {
     let paymentStatus = null;
     let paymentDetails = null;
 
-    // ✅ Use forPackages balance first
     if (availablePackageBalance >= payableAmount) {
       walletUsed = payableAmount;
       staff.wallet_balance -= walletUsed;
@@ -2572,7 +2661,6 @@ export const createPackageBooking = async (req, res) => {
       staff.wallet_balance -= walletUsed;
       staff.forPackages = 0;
 
-      // ✅ Razorpay flow
       if (!transactionId) {
         return res.status(402).json({
           message: "Insufficient wallet balance. Please provide transactionId for online payment.",
@@ -2610,7 +2698,6 @@ export const createPackageBooking = async (req, res) => {
       paymentDetails = paymentInfo;
     }
 
-    // ✅ Wallet logs
     if (walletUsed > 0) {
       staff.wallet_logs.push({
         type: "debit",
@@ -2625,12 +2712,15 @@ export const createPackageBooking = async (req, res) => {
 
     await staff.save();
 
-    // ✅ Parse "dd/mm/yyyy" date format
     const [dd, mm, yyyy] = date.split("/");
     const parsedDate = new Date(`${yyyy}-${mm}-${dd}`);
-    const formattedDate = moment(parsedDate).format("MMMM DD, YYYY"); // → "July 23, 2025"
+    const formattedDate = moment(parsedDate).format("YYYY-MM-DD");
 
-    // ✅ Create booking
+    // ✅ Generate booking ID
+    const packageBookingId = await generatePackageBookingId(); 
+    const diagnosticBookingId = await generateDiagnosticBookingId();
+
+
     const booking = new Booking({
       staffId,
       familyMemberId,
@@ -2647,9 +2737,37 @@ export const createPackageBooking = async (req, res) => {
       paymentStatus,
       paymentDetails,
       isSuccessfull: true,
+      packageBookingId,
+      diagnosticBookingId, // ✅ Add this
     });
 
     const savedBooking = await booking.save();
+
+    // ✅ Mark Slot isBooked = true
+    const diagnostic = await Diagnostic.findById(diagnosticId);
+    if (diagnostic) {
+      let updated = false;
+
+      if (serviceType === "Home Collection") {
+        diagnostic.homeCollectionSlots = diagnostic.homeCollectionSlots.map(slot => {
+          if (slot.date === formattedDate && slot.timeSlot === timeSlot && !slot.isBooked) {
+            slot.isBooked = true;
+            updated = true;
+          }
+          return slot;
+        });
+      } else if (serviceType === "Center Visit") {
+        diagnostic.centerVisitSlots = diagnostic.centerVisitSlots.map(slot => {
+          if (slot.date === formattedDate && slot.timeSlot === timeSlot && !slot.isBooked) {
+            slot.isBooked = true;
+            updated = true;
+          }
+          return slot;
+        });
+      }
+
+      if (updated) await diagnostic.save();
+    }
 
     // ✅ Notification
     staff.notifications.push({
@@ -2668,6 +2786,7 @@ export const createPackageBooking = async (req, res) => {
       onlinePaymentUsed,
       remainingWalletBalance: staff.wallet_balance,
       forPackagesBalance: staff.forPackages,
+      packageBookingId,
       booking: savedBooking,
     });
   } catch (err) {
@@ -2675,6 +2794,7 @@ export const createPackageBooking = async (req, res) => {
     res.status(500).json({ message: "Server error", isSuccessfull: false, error: err.message });
   }
 };
+
 
 export const getSingleBooking = async (req, res) => {
   try {
@@ -2780,6 +2900,49 @@ function generateJitsiLink() {
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID || "rzp_test_BxtRNvflG06PTV",
   key_secret: process.env.RAZORPAY_KEY_SECRET || "RecEtdcenmR7Lm4AIEwo4KFr",
+});
+
+
+
+
+// 🟢 Daily.co Room Creation Function
+const createDailyMeetingRoom = async () => {
+  try {
+    const response = await axios.post(
+      "https://api.daily.co/v1/rooms",
+      {
+        properties: {
+          exp: Math.floor(Date.now() / 1000) + 60 * 60, // 1 hour expiry
+          enable_chat: true,
+          enable_screenshare: true,
+          start_video_off: false,
+          start_audio_off: false,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.DAILY_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    return response.data.url;
+  } catch (error) {
+    console.error("❌ Failed to create Daily.co room:", error.message);
+    return null;
+  }
+};
+
+
+
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL,
+    pass: process.env.PASS
+  }
 });
 
 
@@ -2913,7 +3076,7 @@ export const createDoctorConsultationBooking = async (req, res) => {
     // ✅ Generate Google Meet link (dummy for now)
     let meetingLink = null;
     if (type === "Online") {
-      meetingLink = "https://meet.google.com/kas-xfzh-irp";
+      meetingLink = "";  // <-- Set empty string instead of generating link
     }
 
     // ✅ Generate new booking ID
@@ -2993,6 +3156,35 @@ export const createDoctorConsultationBooking = async (req, res) => {
 
     if (updated) {
       await doctor.save();
+    }
+
+
+
+    // ✅ Send email to staff
+    const mailOptions = {
+      from: `"PixelMind Health" <${process.env.EMAIL}>`,
+      to: staff.email,
+      subject: "Your Doctor Consultation is Confirmed",
+      html: `
+        <h2>Consultation Booking Confirmed</h2>
+        <p>Hello ${staff.name},</p>
+        <p>Your consultation with <strong>Dr. ${doctor.name}</strong> has been successfully booked.</p>
+        <p><strong>Booking ID:</strong> ${formattedBookingId}</p>
+        <p><strong>Date:</strong> ${date}</p>
+        <p><strong>Time Slot:</strong> ${timeSlot}</p>
+        <p><strong>Consultation Type:</strong> ${type}</p>
+        <p><strong>Meeting Link:</strong> ${meetingLink || "N/A"}</p>
+        <p><strong>Paid Amount:</strong> ₹${consultationFee}</p>
+        <br>
+        <p>Thank you,<br>Team PixelMind</p>
+      `
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+      console.log("✅ Email sent to:", staff.email);
+    } catch (err) {
+      console.error("❌ Email sending failed:", err);
     }
 
     // ✅ Send response with clean date format
@@ -3097,6 +3289,18 @@ export const submitHraAnswers = async (req, res) => {
       return res.status(400).json({ message: "❗ Staff ID and answers are required." });
     }
 
+    // Fetch all HRA categories once
+    const hraCategories = await Hra.find();
+
+    // Map category name -> prescribed message
+    const prescribedMap = {};
+    hraCategories.forEach(cat => {
+      prescribedMap[cat.hraName] = cat.prescribed || '';
+    });
+
+    // Accumulate points per category
+    const categoryPoints = {};
+
     let totalPoints = 0;
 
     for (const { questionId, selectedOption } of answers) {
@@ -3106,26 +3310,44 @@ export const submitHraAnswers = async (req, res) => {
       const selected = question.options.find(opt => opt._id.toString() === selectedOption);
       if (!selected) continue;
 
-      totalPoints += selected.point || 0;
+      const points = selected.point || 0;
+      totalPoints += points;
+
+      const categoryName = question.hraCategoryName || "Uncategorized";
+
+      if (!categoryPoints[categoryName]) {
+        categoryPoints[categoryName] = 0;
+      }
+      categoryPoints[categoryName] += points;
     }
 
-    // Determine risk level
+    // Determine overall risk level with new ranges
     let riskLevel = "Low";
     let riskMessage = "🎉 Congratulations! You are maintaining a healthy lifestyle. Keep it up!";
 
-    if (totalPoints >= 20 && totalPoints <= 40) {
+    if (totalPoints >= 50 && totalPoints <= 75) {
       riskLevel = "Moderate";
       riskMessage = "👍 Good job! But there’s room for improvement. Pay attention to your habits.";
-    } else if (totalPoints > 40) {
+    } else if (totalPoints < 50) {
       riskLevel = "High";
       riskMessage = "⚠️ Your score indicates a high heart risk. Please consult a health professional.";
+    }
+
+    // Prepare prescribed messages for categories with score <= 5
+    const prescribedForCategories = {};
+    for (const [category, points] of Object.entries(categoryPoints)) {
+      if (points <= 5 && prescribedMap[category]) {
+        prescribedForCategories[category] = prescribedMap[category];
+      }
     }
 
     return res.status(200).json({
       message: `🎯 Hurrah! You scored ${totalPoints} points.`,
       totalPoints,
       riskLevel,
-      riskMessage
+      riskMessage,
+      categoryPoints,
+      prescribedForCategories
     });
 
   } catch (error) {
@@ -3142,9 +3364,8 @@ export const submitHraAnswers = async (req, res) => {
 
 
 
-
 export const sendMessage = async (req, res) => {
- chatFunction(req, res, async function (err) {
+  chatFunction(req, res, async function (err) {
     if (err) {
       // Multer error (file size, type, etc)
       return res.status(400).json({ success: false, message: err.message });
@@ -3263,22 +3484,37 @@ export const getChatHistory = async (req, res) => {
   try {
     const { staffId, doctorId } = req.params;
 
+    // Validate MongoDB ObjectIds
+    if (!mongoose.Types.ObjectId.isValid(staffId) || !mongoose.Types.ObjectId.isValid(doctorId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid staffId or doctorId.',
+      });
+    }
+
     const staffObjectId = new mongoose.Types.ObjectId(staffId);
     const doctorObjectId = new mongoose.Types.ObjectId(doctorId);
 
+    // Fetch all messages between staff and doctor
     const messages = await Chat.find({
       $or: [
         { senderId: staffObjectId, receiverId: doctorObjectId },
-        { senderId: doctorObjectId, receiverId: staffObjectId }
-      ]
+        { senderId: doctorObjectId, receiverId: staffObjectId },
+      ],
     }).sort({ timestamp: 1 });
 
     if (!messages.length) {
-      return res.status(404).json({ success: false, message: 'No chat history found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'No chat history found.',
+      });
     }
 
-    const staff = await Staff.findById(staffId);
-    const doctor = await Doctor.findById(doctorId);
+    // Fetch names for mapping
+    const [staff, doctor] = await Promise.all([
+      Staff.findById(staffId),
+      Doctor.findById(doctorId),
+    ]);
 
     if (!staff || !doctor) {
       return res.status(404).json({
@@ -3287,28 +3523,29 @@ export const getChatHistory = async (req, res) => {
       });
     }
 
-    const formattedMessages = messages.map(message => {
-      const senderName = String(message.senderId) === String(staffId) ? staff.name : doctor.name;
-      const receiverName = String(message.receiverId) === String(staffId) ? staff.name : doctor.name;
+    // Prepare formatted messages with ISO timestamps (frontend will format)
+    const formattedMessages = messages.map((message) => {
+      const isSenderStaff = String(message.senderId) === String(staffId);
+      const isReceiverStaff = String(message.receiverId) === String(staffId);
 
       return {
         ...message.toObject(),
-        timestamp: moment(message.timestamp).format('YYYY-MM-DD hh:mm A'),
-        sender: senderName,
-        receiver: receiverName,
+        timestamp: message.timestamp.toISOString(), // Send ISO format
+        sender: isSenderStaff ? staff.name : doctor.name,
+        receiver: isReceiverStaff ? staff.name : doctor.name,
       };
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       messages: formattedMessages,
     });
 
   } catch (error) {
     console.error('❌ Error fetching chat:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Error fetching chat',
+      message: 'Error fetching chat history',
       error: error.message,
     });
   }
@@ -3474,7 +3711,7 @@ export const getRecentPackageBooking = async (req, res) => {
 export const getSlotsByDiagnosticId = async (req, res) => {
   try {
     const { diagnosticId } = req.params;
-    const { date, type } = req.query; // date and optional type from query params
+    const { date, type } = req.query; // Expecting ?date=YYYY-MM-DD&type=Home Collection|Center Visit
 
     if (!diagnosticId) {
       return res.status(400).json({ message: "Diagnostic ID is required in params" });
@@ -3484,51 +3721,165 @@ export const getSlotsByDiagnosticId = async (req, res) => {
       return res.status(400).json({ message: "Date is required in query params" });
     }
 
-    // Parse date flexibly with moment
     const parsedDate = moment(date, [
       "YYYY/MM/DD", "DD/MM/YYYY", "YYYY-MM-DD", "MMMM DD, YYYY", "DD MMMM YYYY"
     ], true);
 
     if (!parsedDate.isValid()) {
-      return res.status(400).json({ message: "Invalid date format. Use 'YYYY/MM/DD', 'DD/MM/YYYY', 'YYYY-MM-DD', or 'MMMM DD, YYYY'." });
+      return res.status(400).json({ message: "Invalid date format." });
     }
 
     const formattedDate = parsedDate.format("YYYY-MM-DD");
 
-    // Fetch diagnostic center
     const diagnostic = await Diagnostic.findById(diagnosticId).select("homeCollectionSlots centerVisitSlots");
     if (!diagnostic) {
       return res.status(404).json({ message: "Diagnostic center not found" });
     }
 
-    let homeSlots = diagnostic.homeCollectionSlots || [];
-    let centerSlots = diagnostic.centerVisitSlots || [];
+    const now = moment();
 
-    // Filter slots by date (DO NOT exclude booked slots)
-    homeSlots = homeSlots.filter(slot => slot.date === formattedDate);
-    centerSlots = centerSlots.filter(slot => slot.date === formattedDate);
+    // 🔧 Process slots to plain JS objects and add isExpired flag
+    const processSlots = (slotsArray) => {
+      return (slotsArray || [])
+        .filter(slot => slot.date === formattedDate)
+        .map(slotDoc => {
+          const slot = slotDoc.toObject(); // Clean mongoose metadata
+          const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
+            'YYYY-MM-DD HH:mm',
+            'YYYY-MM-DD H:mm',
+            'YYYY-MM-DD h:mm A'
+          ]);
 
+          return {
+            ...slot,
+            isExpired: !slotDateTime.isValid() || slotDateTime.isBefore(now)
+          };
+        });
+    };
+
+    const processedHomeSlots = processSlots(diagnostic.homeCollectionSlots);
+    const processedCenterSlots = processSlots(diagnostic.centerVisitSlots);
+
+    // 🎯 Return based on type
     if (type === "Home Collection") {
       return res.status(200).json({
         message: "Home collection slots fetched successfully",
-        slots: homeSlots,
+        slots: processedHomeSlots,
       });
     } else if (type === "Center Visit") {
       return res.status(200).json({
         message: "Center visit slots fetched successfully",
-        slots: centerSlots,
+        slots: processedCenterSlots,
       });
     }
 
-    // If no type filter, return both
+    // Default response (if no type specified)
     return res.status(200).json({
       message: "Slots fetched successfully",
-      homeCollectionSlots: homeSlots,
-      centerVisitSlots: centerSlots,
+      homeCollectionSlots: processedHomeSlots,
+      centerVisitSlots: processedCenterSlots,
     });
 
   } catch (error) {
-    console.error("Error fetching diagnostic slots:", error);
+    console.error("❌ Error fetching diagnostic slots:", error);
     return res.status(500).json({ message: "Internal Server Error", error: error.message });
+  }
+};
+
+export const getHraByStaff = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+
+    // Fetch staff details
+    const staff = await Staff.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ message: "Staff not found" });
+    }
+
+    // Get all HRAs
+    let hras = await Hra.find();
+
+    // Filter out "Women’s Health" if staff is male
+    if (staff.gender === "Male") {
+      hras = hras.filter(hra => hra.hraName !== "Women’s Health");
+    }
+
+    if (!hras.length) {
+      return res.status(404).json({ message: "No HRAs found" });
+    }
+
+    return res.status(200).json({
+      message: "HRAs fetched successfully",
+      hras
+    });
+  } catch (error) {
+    console.error("Error fetching HRAs:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message
+    });
+  }
+};
+
+export const getDoctorSlotsByDate = async (req, res) => {
+  try {
+    const { doctorId } = req.params;
+    const { date, type } = req.query;
+
+    if (!date) {
+      return res.status(400).json({ message: "Date is required in query params" });
+    }
+
+    const doctor = await Doctor.findById(doctorId);
+    if (!doctor) {
+      return res.status(404).json({ message: "Doctor not found" });
+    }
+
+    const formattedDate = moment(date, "YYYY-MM-DD").format("YYYY-MM-DD");
+    const now = moment();
+
+    let slots = [];
+
+    if (type === "online") {
+      slots = doctor.onlineSlots || [];
+    } else if (type === "offline") {
+      slots = doctor.offlineSlots || [];
+    } else {
+      slots = [...(doctor.onlineSlots || []), ...(doctor.offlineSlots || [])];
+    }
+
+    // ✅ Filter + convert each slot to plain JS object + add isExpired
+    const filteredSlots = (slots || [])
+      .filter(slot => slot.date === formattedDate)
+      .map(slotDoc => {
+        const slot = typeof slotDoc.toObject === 'function' ? slotDoc.toObject() : slotDoc;
+        const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
+          "YYYY-MM-DD HH:mm",
+          "YYYY-MM-DD H:mm",
+          "YYYY-MM-DD h:mm A"
+        ]);
+
+        return {
+          ...slot,
+          isExpired: !slotDateTime.isValid() || slotDateTime.isBefore(now)
+        };
+      });
+
+    if (filteredSlots.length === 0) {
+      const availableDates = slots.map(slot => slot.date).filter(Boolean);
+      return res.status(404).json({
+        message: "No valid slots found for the given date",
+        availableDates: availableDates.length > 0 ? availableDates : ["No available dates found"]
+      });
+    }
+
+    return res.status(200).json({
+      date: formattedDate,
+      slots: filteredSlots
+    });
+
+  } catch (error) {
+    console.error("❌ Error in getDoctorSlotsByDate:", error);
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
