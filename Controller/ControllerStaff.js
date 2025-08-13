@@ -15,7 +15,6 @@ import Test from "../Models/Test.js";
 import Xray from "../Models/Xray.js";
 import Cart from "../Models/Cart.js";
 import Booking from "../Models/bookingModel.js";
-import moment from "moment";
 import Package from "../Models/Package.js";
 import HraQuestion from "../Models/HraQuestion.js";
 import Chat from "../Models/Chat.js";
@@ -26,6 +25,9 @@ import { v4 as uuidv4 } from "uuid";
 import Hra from "../Models/HRA.js";
 import dotenv from 'dotenv'
 import nodemailer from "nodemailer";
+import Counter from "../Models/Counter.js";
+import moment from "moment-timezone";
+import crypto from "crypto"; // ✅ Add this import at the top
 
 
 dotenv.config();
@@ -2058,39 +2060,45 @@ export const removeFromCart = async (req, res) => {
 
 
 
-// Utility to generate formatted Diagnostic Booking ID
+// =======================
+// Booking ID Generators
+// =======================
 const generateDiagnosticBookingId = async () => {
-  const lastBooking = await Booking.findOne({})
-    .sort({ createdAt: -1 })
+  const lastBooking = await Booking.findOne({
+    diagnosticBookingId: { $ne: null }
+  })
+    .sort({ diagnosticBookingId: -1 }) // Sort by ID value
     .select("diagnosticBookingId");
 
-  if (!lastBooking || !lastBooking.diagnosticBookingId) {
+  if (!lastBooking) {
     return "DIA-0001";
   }
 
-  const lastId = parseInt(lastBooking.diagnosticBookingId.split("-")[1]);
+  const lastId = parseInt(lastBooking.diagnosticBookingId.split("-")[1], 10);
   const newId = (lastId + 1).toString().padStart(4, "0");
   return `DIA-${newId}`;
 };
 
-// Utility to generate formatted Package Booking ID
 const generatePackageBookingId = async () => {
-  const lastBooking = await Booking.findOne({})
-    .sort({ createdAt: -1 })
+  const lastBooking = await Booking.findOne({
+    packageBookingId: { $ne: null }
+  })
+    .sort({ packageBookingId: -1 }) // Sort by ID value
     .select("packageBookingId");
 
-  if (!lastBooking || !lastBooking.packageBookingId) {
+  if (!lastBooking) {
     return "PKG-0001";
   }
 
-  const lastId = parseInt(lastBooking.packageBookingId.split("-")[1]);
+  const lastId = parseInt(lastBooking.packageBookingId.split("-")[1], 10);
   const newId = (lastId + 1).toString().padStart(4, "0");
   return `PKG-${newId}`;
 };
 
 
-
-
+// =======================
+// Create Booking from Staff Cart
+// =======================
 export const createBookingFromStaffCart = async (req, res) => {
   try {
     const { staffId } = req.params;
@@ -2101,31 +2109,51 @@ export const createBookingFromStaffCart = async (req, res) => {
       date,
       timeSlot,
       transactionId,
+      addressId
     } = req.body;
 
+    // Validate service type
     if (!["Home Collection", "Center Visit"].includes(serviceType)) {
-      return res.status(400).json({ message: "Invalid service type", isSuccessfull: false });
+      return res.status(400).json({
+        message: "Invalid service type",
+        isSuccessfull: false
+      });
     }
 
+    // Find staff
     const staff = await Staff.findById(staffId);
-    if (!staff) return res.status(404).json({ message: "Staff not found", isSuccessfull: false });
+    if (!staff) {
+      return res.status(404).json({
+        message: "Staff not found",
+        isSuccessfull: false
+      });
+    }
 
+    // Find cart
     const staffCart = await Cart.findOne({ userId: staffId });
     if (!staffCart || !staffCart.items.length) {
-      return res.status(404).json({ message: "Cart is empty or not found for staff", isSuccessfull: false });
+      return res.status(404).json({
+        message: "Cart is empty or not found for staff",
+        isSuccessfull: false
+      });
     }
 
-    const totalPrice = staffCart.totalPrice ?? staffCart.items.reduce((sum, item) => sum + (item.totalPrice || item.price || 0), 0);
+    // Calculate price
+    const totalPrice =
+      staffCart.totalPrice ??
+      staffCart.items.reduce(
+        (sum, item) => sum + (item.totalPrice || item.price || 0),
+        0
+      );
     const payableAmount = staffCart.payableAmount ?? totalPrice;
 
-    const availableBalance = staff.forTests || 0;
-
+    // Wallet + Payment logic
     let walletUsed = 0;
     let onlinePaymentUsed = 0;
     let paymentStatus = null;
     let paymentDetails = null;
+    const availableBalance = staff.forTests || 0;
 
-    // ✅ Use wallet first
     if (availableBalance >= payableAmount) {
       walletUsed = payableAmount;
       staff.wallet_balance -= walletUsed;
@@ -2138,38 +2166,53 @@ export const createBookingFromStaffCart = async (req, res) => {
 
       if (!transactionId) {
         return res.status(402).json({
-          message: "Insufficient wallet balance. Please provide transactionId for online payment.",
+          message:
+            "Insufficient wallet balance. Please provide transactionId for online payment.",
           isSuccessfull: false,
           walletAvailable: availableBalance,
           requiredOnline: onlinePaymentUsed,
         });
       }
 
-      // ✅ Razorpay capture
-      let paymentInfo = await razorpay.payments.fetch(transactionId);
-      if (!paymentInfo) {
-        return res.status(404).json({ message: "Payment not found", isSuccessfull: false });
+      // Razorpay capture
+      let paymentInfo;
+      try {
+        paymentInfo = await razorpay.payments.fetch(transactionId);
+      } catch (err) {
+        return res.status(400).json({
+          message: "Invalid transaction ID",
+          isSuccessfull: false
+        });
       }
 
       if (paymentInfo.status === "authorized") {
         try {
-          await razorpay.payments.capture(transactionId, paymentInfo.amount, "INR");
-          paymentInfo = await razorpay.payments.fetch(transactionId); // refresh
+          await razorpay.payments.capture(
+            transactionId,
+            paymentInfo.amount,
+            "INR"
+          );
+          paymentInfo = await razorpay.payments.fetch(transactionId);
         } catch (err) {
-          console.error("❌ Razorpay capture failed:", err);
-          return res.status(500).json({ message: "Payment capture failed", isSuccessfull: false });
+          return res.status(500).json({
+            message: "Payment capture failed",
+            isSuccessfull: false
+          });
         }
       }
 
       if (paymentInfo.status !== "captured") {
-        return res.status(400).json({ message: `Payment not captured. Status: ${paymentInfo.status}`, isSuccessfull: false });
+        return res.status(400).json({
+          message: `Payment not captured. Status: ${paymentInfo.status}`,
+          isSuccessfull: false
+        });
       }
 
       paymentStatus = paymentInfo.status;
       paymentDetails = paymentInfo;
     }
 
-    // ✅ Wallet log
+    // Wallet log
     if (walletUsed > 0) {
       staff.wallet_logs.push({
         type: "debit",
@@ -2184,10 +2227,30 @@ export const createBookingFromStaffCart = async (req, res) => {
 
     await staff.save();
 
+    // Generate unique booking ID
     const diagnosticBookingId = await generateDiagnosticBookingId();
 
-    const bookingDate = moment(date, ["YYYY-MM-DD", "DD/MM/YYYY"]).format("YYYY-MM-DD");
+    // Safe date formatting
+    const bookingDate = moment(date, [
+      "YYYY-MM-DD",
+      "DD/MM/YYYY",
+      "MM/DD/YYYY"
+    ]).isValid()
+      ? moment(date, [
+          "YYYY-MM-DD",
+          "DD/MM/YYYY",
+          "MM/DD/YYYY"
+        ]).format("YYYY-MM-DD")
+      : null;
 
+    if (!bookingDate) {
+      return res.status(400).json({
+        message: "Invalid date format",
+        isSuccessfull: false
+      });
+    }
+
+    // Create booking
     const booking = new Booking({
       staffId,
       familyMemberId,
@@ -2205,46 +2268,72 @@ export const createBookingFromStaffCart = async (req, res) => {
       transactionId: transactionId || null,
       paymentStatus,
       paymentDetails,
-      isSuccessfull: true
+      isSuccessfull: true,
+      addressId: serviceType === "Home Collection" ? addressId : null // Add addressId condition
     });
 
     const savedBooking = await booking.save();
 
-    // ✅ Mark diagnostic slot as isBooked: true
+    // Mark diagnostic slot as booked
     const diagnostic = await Diagnostic.findById(diagnosticId);
     if (diagnostic) {
       let updated = false;
 
+      const updateSlots = (slots) =>
+        slots.map(slot => {
+          if (
+            slot.date === bookingDate &&
+            slot.timeSlot === timeSlot &&
+            !slot.isBooked
+          ) {
+            slot.isBooked = true;
+            updated = true;
+          }
+          return slot;
+        });
+
       if (serviceType === "Home Collection") {
-        diagnostic.homeCollectionSlots = diagnostic.homeCollectionSlots.map(slot => {
-          if (slot.date === bookingDate && slot.timeSlot === timeSlot && !slot.isBooked) {
-            slot.isBooked = true;
-            updated = true;
-          }
-          return slot;
-        });
+        diagnostic.homeCollectionSlots = updateSlots(diagnostic.homeCollectionSlots);
       } else if (serviceType === "Center Visit") {
-        diagnostic.centerVisitSlots = diagnostic.centerVisitSlots.map(slot => {
-          if (slot.date === bookingDate && slot.timeSlot === timeSlot && !slot.isBooked) {
-            slot.isBooked = true;
-            updated = true;
-          }
-          return slot;
-        });
+        diagnostic.centerVisitSlots = updateSlots(diagnostic.centerVisitSlots);
       }
 
       if (updated) await diagnostic.save();
     }
 
-    // ✅ Notification
+    // Notification
     staff.notifications.push({
       title: "Diagnostics Booking Confirmed",
       message: `Your diagnostic booking for ${bookingDate} at ${timeSlot} has been confirmed.`,
       timestamp: new Date(),
       bookingId: savedBooking._id,
     });
-
     await staff.save();
+
+    // Email
+    const mailOptions = {
+      from: `"Credent Health" <${process.env.EMAIL}>`,
+      to: staff.email,
+      subject: "Your Diagnostics Booking is Confirmed",
+      html: `
+        <h2>Diagnostics Booking Confirmed</h2>
+        <p>Hello ${staff.name},</p>
+        <p>Your diagnostic booking has been successfully confirmed.</p>
+        <p><strong>Booking ID:</strong> ${diagnosticBookingId}</p>
+        <p><strong>Date:</strong> ${bookingDate}</p>
+        <p><strong>Time Slot:</strong> ${timeSlot}</p>
+        <p><strong>Service Type:</strong> ${serviceType}</p>
+        <p><strong>Paid Amount:</strong> ₹${payableAmount}</p>
+        <br>
+        <p>Thank you,<br>Team CredentHealth</p>
+      `
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+    } catch (err) {
+      console.error("Email sending failed:", err);
+    }
 
     return res.status(201).json({
       message: "Booking created successfully.",
@@ -2258,10 +2347,15 @@ export const createBookingFromStaffCart = async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ Error creating booking:", err);
-    res.status(500).json({ message: "Server error", isSuccessfull: false, error: err.message });
+    console.error("Error creating booking:", err);
+    res.status(500).json({
+      message: "Server error",
+      isSuccessfull: false,
+      error: err.message
+    });
   }
 };
+
 export const myBookings = async (req, res) => {
   try {
     const staffId = req.params.staffId;
@@ -2620,10 +2714,19 @@ export const downloadReport = async (req, res) => {
 
 
 
+// 📧 Email transporter
+// const transporter = nodemailer.createTransport({
+//   service: 'gmail',
+//   auth: {
+//     user: process.env.EMAIL, // "credenthealth@gmail.com"
+//     pass: process.env.PASS   // "wgsvkqhgidzgnpna" (App password)
+//   }
+// });
+
 export const createPackageBooking = async (req, res) => {
   try {
     const { staffId } = req.params;
-    const {
+    let {
       familyMemberId,
       diagnosticId,
       packageId,
@@ -2631,18 +2734,26 @@ export const createPackageBooking = async (req, res) => {
       date,
       timeSlot,
       transactionId,
+      addressId // Added addressId field
     } = req.body;
 
+    // 🛠 Convert "null" string to actual null
+    if (timeSlot === "null") timeSlot = null;
+    if (transactionId === "null") transactionId = null;
+
+    // 🛠 Validate service type
     if (!["Home Collection", "Center Visit"].includes(serviceType)) {
       return res.status(400).json({ message: "Invalid service type", isSuccessfull: false });
     }
 
+    // 🛠 Fetch staff and package
     const staff = await Staff.findById(staffId);
     if (!staff) return res.status(404).json({ message: "Staff not found", isSuccessfull: false });
 
     const packageData = await Package.findById(packageId);
     if (!packageData) return res.status(404).json({ message: "Package not found", isSuccessfull: false });
 
+    // 💰 Payment calculation
     const payableAmount = packageData.offerPrice || packageData.price;
     const availablePackageBalance = staff.forPackages || 0;
 
@@ -2678,7 +2789,6 @@ export const createPackageBooking = async (req, res) => {
           await razorpay.payments.capture(transactionId, onlinePaymentUsed * 100, "INR");
           paymentInfo = await razorpay.payments.fetch(transactionId);
         } catch (err) {
-          console.error("❌ Razorpay capture failed:", err);
           return res.status(500).json({
             message: "Payment capture failed",
             isSuccessfull: false,
@@ -2698,6 +2808,7 @@ export const createPackageBooking = async (req, res) => {
       paymentDetails = paymentInfo;
     }
 
+    // 🛠 Wallet log
     if (walletUsed > 0) {
       staff.wallet_logs.push({
         type: "debit",
@@ -2709,18 +2820,26 @@ export const createPackageBooking = async (req, res) => {
         date: new Date(),
       });
     }
-
     await staff.save();
 
-    const [dd, mm, yyyy] = date.split("/");
-    const parsedDate = new Date(`${yyyy}-${mm}-${dd}`);
-    const formattedDate = moment(parsedDate).format("YYYY-MM-DD");
+    // 📅 Flexible Date Handling
+    let formattedDate;
+    if (date.includes("/")) {
+      const parts = date.split("/");
+      if (parts[0].length === 4) {
+        formattedDate = moment(`${parts[0]}-${parts[1]}-${parts[2]}`).format("YYYY-MM-DD");
+      } else {
+        formattedDate = moment(`${parts[2]}-${parts[1]}-${parts[0]}`).format("YYYY-MM-DD");
+      }
+    } else {
+      formattedDate = moment(date).format("YYYY-MM-DD");
+    }
 
-    // ✅ Generate booking ID
-    const packageBookingId = await generatePackageBookingId(); 
+    // 🔢 Unique Booking IDs
+    const packageBookingId = await generatePackageBookingId();
     const diagnosticBookingId = await generateDiagnosticBookingId();
 
-
+    // 💾 Save booking
     const booking = new Booking({
       staffId,
       familyMemberId,
@@ -2733,21 +2852,21 @@ export const createPackageBooking = async (req, res) => {
       discount: 0,
       payableAmount,
       status: "Confirmed",
-      transactionId: transactionId || null,
+      transactionId,
       paymentStatus,
       paymentDetails,
       isSuccessfull: true,
       packageBookingId,
-      diagnosticBookingId, // ✅ Add this
+      diagnosticBookingId,
+       addressId: serviceType === "Home Collection" ? addressId : null // Add addressId condition
     });
 
     const savedBooking = await booking.save();
 
-    // ✅ Mark Slot isBooked = true
+    // 🕒 Update slot booking
     const diagnostic = await Diagnostic.findById(diagnosticId);
     if (diagnostic) {
       let updated = false;
-
       if (serviceType === "Home Collection") {
         diagnostic.homeCollectionSlots = diagnostic.homeCollectionSlots.map(slot => {
           if (slot.date === formattedDate && slot.timeSlot === timeSlot && !slot.isBooked) {
@@ -2756,7 +2875,7 @@ export const createPackageBooking = async (req, res) => {
           }
           return slot;
         });
-      } else if (serviceType === "Center Visit") {
+      } else {
         diagnostic.centerVisitSlots = diagnostic.centerVisitSlots.map(slot => {
           if (slot.date === formattedDate && slot.timeSlot === timeSlot && !slot.isBooked) {
             slot.isBooked = true;
@@ -2765,20 +2884,38 @@ export const createPackageBooking = async (req, res) => {
           return slot;
         });
       }
-
       if (updated) await diagnostic.save();
     }
 
-    // ✅ Notification
+    // 🔔 Notify staff
     staff.notifications.push({
       title: "Package Booking Confirmed",
-      message: `Your package booking for ${date} at ${timeSlot} has been confirmed.`,
+      message: `Your package booking for ${formattedDate} at ${timeSlot || "N/A"} has been confirmed.`,
       timestamp: new Date(),
       bookingId: savedBooking._id,
     });
-
     await staff.save();
 
+    // 📧 Send Email
+    transporter.sendMail({
+      from: `"Credent Health" <${process.env.EMAIL}>`,
+      to: staff.email,
+      subject: "Your Package Booking is Confirmed",
+      html: `
+        <h2>Package Booking Confirmed</h2>
+        <p>Hello ${staff.name},</p>
+        <p>Your booking for <strong>${packageData.name}</strong> is confirmed.</p>
+        <p><strong>Booking ID:</strong> ${packageBookingId}</p>
+        <p><strong>Date:</strong> ${formattedDate}</p>
+        <p><strong>Time:</strong> ${timeSlot || "N/A"}</p>
+        <p><strong>Service Type:</strong> ${serviceType}</p>
+        <p><strong>Amount Paid:</strong> ₹${payableAmount}</p>
+      `
+    }, (error) => {
+      if (error) console.error("Email send failed:", error);
+    });
+
+    // ✅ Success Response
     return res.status(201).json({
       message: "Package booking created successfully.",
       isSuccessfull: true,
@@ -2789,12 +2926,12 @@ export const createPackageBooking = async (req, res) => {
       packageBookingId,
       booking: savedBooking,
     });
+
   } catch (err) {
-    console.error("❌ Error creating package booking:", err);
+    console.error("Error creating package booking:", err);
     res.status(500).json({ message: "Server error", isSuccessfull: false, error: err.message });
   }
 };
-
 
 export const getSingleBooking = async (req, res) => {
   try {
@@ -3079,20 +3216,13 @@ export const createDoctorConsultationBooking = async (req, res) => {
       meetingLink = "";  // <-- Set empty string instead of generating link
     }
 
-    // ✅ Generate new booking ID
-    const lastBooking = await Booking.findOne({ doctorConsultationBookingId: { $exists: true } })
-      .sort({ createdAt: -1 });
-
-    let newBookingNumber = 1;
-    if (lastBooking && lastBooking.doctorConsultationBookingId) {
-      const parts = lastBooking.doctorConsultationBookingId.split('_');
-      const lastNum = parseInt(parts[1]);
-      if (!isNaN(lastNum)) {
-        newBookingNumber = lastNum + 1;
-      }
-    }
-
-    const formattedBookingId = `DoctorBookingId_${String(newBookingNumber).padStart(4, '0')}`;
+    // Persistent Booking ID
+    let counter = await Counter.findOneAndUpdate(
+      { name: "doctorConsultationBooking" },
+      { $inc: { value: 1 } },
+      { new: true, upsert: true }
+    );
+    const formattedBookingId = `DoctorBookingId_${String(counter.value).padStart(4, '0')}`;
 
     // ✅ Create booking
     const booking = new Booking({
@@ -3162,7 +3292,7 @@ export const createDoctorConsultationBooking = async (req, res) => {
 
     // ✅ Send email to staff
     const mailOptions = {
-      from: `"PixelMind Health" <${process.env.EMAIL}>`,
+      from: `"Credent Health" <${process.env.EMAIL}>`,
       to: staff.email,
       subject: "Your Doctor Consultation is Confirmed",
       html: `
@@ -3176,16 +3306,17 @@ export const createDoctorConsultationBooking = async (req, res) => {
         <p><strong>Meeting Link:</strong> ${meetingLink || "N/A"}</p>
         <p><strong>Paid Amount:</strong> ₹${consultationFee}</p>
         <br>
-        <p>Thank you,<br>Team PixelMind</p>
+        <p>Thank you,<br>Team CredentHealth</p>
       `
     };
 
-    try {
-      await transporter.sendMail(mailOptions);
-      console.log("✅ Email sent to:", staff.email);
-    } catch (err) {
-      console.error("❌ Email sending failed:", err);
-    }
+   try {
+  await transporter.sendMail(mailOptions);
+  console.log("✅ Email sent to:", staff.email);
+} catch (err) {
+  console.error("❌ Email sending failed:", err);
+}
+
 
     // ✅ Send response with clean date format
     res.status(201).json({
@@ -3338,6 +3469,7 @@ export const submitHraAnswers = async (req, res) => {
     for (const [category, points] of Object.entries(categoryPoints)) {
       if (points <= 5 && prescribedMap[category]) {
         prescribedForCategories[category] = prescribedMap[category];
+        break;  // Only first one added, then exit
       }
     }
 
@@ -3358,7 +3490,6 @@ export const submitHraAnswers = async (req, res) => {
     });
   }
 };
-
 
 
 
@@ -3736,23 +3867,30 @@ export const getSlotsByDiagnosticId = async (req, res) => {
       return res.status(404).json({ message: "Diagnostic center not found" });
     }
 
-    const now = moment();
+    // IST current time
+    const now = moment.tz("Asia/Kolkata");
 
-    // 🔧 Process slots to plain JS objects and add isExpired flag
+    // Function to process slots and filter out expired ones
     const processSlots = (slotsArray) => {
       return (slotsArray || [])
         .filter(slot => slot.date === formattedDate)
+        .filter(slot => {
+          const slotDateTime = moment.tz(
+            `${slot.date} ${slot.timeSlot}`,
+            ['YYYY-MM-DD HH:mm', 'YYYY-MM-DD H:mm', 'YYYY-MM-DD h:mm A'],
+            "Asia/Kolkata"
+          );
+          return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
+        })
         .map(slotDoc => {
-          const slot = slotDoc.toObject(); // Clean mongoose metadata
-          const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
-            'YYYY-MM-DD HH:mm',
-            'YYYY-MM-DD H:mm',
-            'YYYY-MM-DD h:mm A'
-          ]);
+          const slot = slotDoc.toObject(); // remove mongoose metadata
 
           return {
-            ...slot,
-            isExpired: !slotDateTime.isValid() || slotDateTime.isBefore(now)
+            _id: slot._id,
+            day: slot.day,
+            date: slot.date,
+            timeSlot: slot.timeSlot,
+            isBooked: slot.isBooked
           };
         });
     };
@@ -3760,20 +3898,30 @@ export const getSlotsByDiagnosticId = async (req, res) => {
     const processedHomeSlots = processSlots(diagnostic.homeCollectionSlots);
     const processedCenterSlots = processSlots(diagnostic.centerVisitSlots);
 
-    // 🎯 Return based on type
     if (type === "Home Collection") {
+      if (processedHomeSlots.length === 0) {
+        return res.status(404).json({ message: "No valid Home Collection slots found for the given date" });
+      }
       return res.status(200).json({
         message: "Home collection slots fetched successfully",
         slots: processedHomeSlots,
       });
     } else if (type === "Center Visit") {
+      if (processedCenterSlots.length === 0) {
+        return res.status(404).json({ message: "No valid Center Visit slots found for the given date" });
+      }
       return res.status(200).json({
         message: "Center visit slots fetched successfully",
         slots: processedCenterSlots,
       });
     }
 
-    // Default response (if no type specified)
+    // For no type or both types combined
+    const combinedSlots = [...processedHomeSlots, ...processedCenterSlots];
+    if (combinedSlots.length === 0) {
+      return res.status(404).json({ message: "No valid slots found for the given date" });
+    }
+
     return res.status(200).json({
       message: "Slots fetched successfully",
       homeCollectionSlots: processedHomeSlots,
@@ -3785,6 +3933,7 @@ export const getSlotsByDiagnosticId = async (req, res) => {
     return res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 };
+
 
 export const getHraByStaff = async (req, res) => {
   try {
@@ -3835,8 +3984,9 @@ export const getDoctorSlotsByDate = async (req, res) => {
       return res.status(404).json({ message: "Doctor not found" });
     }
 
-    const formattedDate = moment(date, "YYYY-MM-DD").format("YYYY-MM-DD");
-    const now = moment();
+    // 📅 Parse and format date in IST
+    const formattedDate = moment.tz(date, "YYYY-MM-DD", "Asia/Kolkata").format("YYYY-MM-DD");
+    const now = moment.tz("Asia/Kolkata");
 
     let slots = [];
 
@@ -3848,16 +3998,17 @@ export const getDoctorSlotsByDate = async (req, res) => {
       slots = [...(doctor.onlineSlots || []), ...(doctor.offlineSlots || [])];
     }
 
-    // ✅ Filter + convert each slot to plain JS object + add isExpired
+    // ✅ Filter + add isExpired based on IST
     const filteredSlots = (slots || [])
       .filter(slot => slot.date === formattedDate)
       .map(slotDoc => {
-        const slot = typeof slotDoc.toObject === 'function' ? slotDoc.toObject() : slotDoc;
-        const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
+        const slot = typeof slotDoc.toObject === "function" ? slotDoc.toObject() : slotDoc;
+
+        const slotDateTime = moment.tz(`${slot.date} ${slot.timeSlot}`, [
           "YYYY-MM-DD HH:mm",
           "YYYY-MM-DD H:mm",
           "YYYY-MM-DD h:mm A"
-        ]);
+        ], "Asia/Kolkata");
 
         return {
           ...slot,
@@ -3881,5 +4032,93 @@ export const getDoctorSlotsByDate = async (req, res) => {
   } catch (error) {
     console.error("❌ Error in getDoctorSlotsByDate:", error);
     return res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
+
+
+
+
+// ✅ Step 1: Request to delete account
+export const deleteAccount = async (req, res) => {
+  const { email, reason } = req.body;
+
+  if (!email || !reason) {
+    return res.status(400).json({ message: "Email and reason are required" });
+  }
+
+  try {
+    const user = await Staff.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Generate token
+    const token = crypto.randomBytes(20).toString("hex");
+    const deleteLink = `${process.env.BASE_URL}/confirm-delete-account/${token}`;
+
+    // Save token & expiry
+    user.deleteToken = token;
+    user.deleteTokenExpiration = Date.now() + 3600000; // 1 hour
+    await user.save();
+
+    // Send email
+    const mailOptions = {
+      from: process.env.EMAIL,
+      to: email,
+      subject: "Account Deletion Request Received",
+      text: `Hi ${user.name},
+
+We have received your account deletion request. To confirm the deletion of your account, please click the link below:
+
+${deleteLink}
+
+Reason: ${reason}
+
+If you have any questions or need further assistance, please contact us at contact.credenthealth@gmail.com.
+
+Best regards,
+Your Team`
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    return res.status(200).json({
+      message:
+        "Account deletion request processed. Please check your email to confirm.",
+      token
+    });
+  } catch (err) {
+    console.error("Error in deleteAccount:", err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+};
+
+// ✅ Step 2: Confirm deletion via email link
+export const confirmDeleteAccount = async (req, res) => {
+  const { token } = req.params;
+
+  try {
+    const user = await Staff.findOne({
+      deleteToken: token,
+      deleteTokenExpiration: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res
+        .status(400)
+        .json({ message: "Invalid or expired deletion token" });
+    }
+
+    await Staff.deleteOne({ _id: user._id });
+
+    return res
+      .status(200)
+      .json({ message: "Your account has been successfully deleted." });
+  } catch (err) {
+    console.error("Error in confirmDeleteAccount:", err);
+    return res.status(500).json({ message: "Something went wrong" });
   }
 };

@@ -18,7 +18,6 @@ import Diagnostic from '../Models/diagnosticModel.js';
 import Hra from '../Models/HRA.js';
 import HraQuestion from '../Models/HraQuestion.js';
 import Blog from '../Models/Blog.js';
-import moment from "moment";
 import TestName from '../Models/TestName.js';
 import { Country, State, City } from 'country-state-city';
 import dayjs from "dayjs";
@@ -27,6 +26,13 @@ import path from 'path';
 import csv from "csvtojson";
 import { fileURLToPath } from "url";
 import Razorpay from 'razorpay';
+
+import dotenv from 'dotenv'
+import nodemailer from "nodemailer";
+import moment from "moment-timezone";
+
+
+dotenv.config();
 
 // ✅ Replace __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -1440,11 +1446,10 @@ export const getDoctorSlotsByDate = async (req, res) => {
       return res.status(404).json({ message: "Doctor not found" });
     }
 
-    const formattedDate = moment(date, "YYYY-MM-DD").format("YYYY-MM-DD");
-    const now = moment();
+    const formattedDate = moment.tz(date, "YYYY-MM-DD", "Asia/Kolkata").format("YYYY-MM-DD");
+    const now = moment.tz("Asia/Kolkata");
 
     let slots = [];
-
     if (type === "online") {
       slots = doctor.onlineSlots || [];
     } else if (type === "offline") {
@@ -1453,28 +1458,27 @@ export const getDoctorSlotsByDate = async (req, res) => {
       slots = [...(doctor.onlineSlots || []), ...(doctor.offlineSlots || [])];
     }
 
-    // ✅ Filter + convert each slot to plain JS object + add isExpired
+    // Filter slots by date and remove expired slots
     const filteredSlots = (slots || [])
       .filter(slot => slot.date === formattedDate)
+      .filter(slot => {
+        const slotDateTime = moment.tz(`${slot.date} ${slot.timeSlot}`, "YYYY-MM-DD HH:mm", "Asia/Kolkata");
+        return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
+      })
       .map(slotDoc => {
-        const slot = typeof slotDoc.toObject === 'function' ? slotDoc.toObject() : slotDoc;
-        const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
-          "YYYY-MM-DD HH:mm",
-          "YYYY-MM-DD H:mm",
-          "YYYY-MM-DD h:mm A"
-        ]);
-
+        const slot = typeof slotDoc.toObject === "function" ? slotDoc.toObject() : slotDoc;
         return {
-          ...slot,
-          isExpired: !slotDateTime.isValid() || slotDateTime.isBefore(now)
+          _id: slot._id,
+          day: slot.day,
+          date: slot.date,
+          timeSlot: slot.timeSlot,
+          isBooked: slot.isBooked
         };
       });
 
     if (filteredSlots.length === 0) {
-      const availableDates = slots.map(slot => slot.date).filter(Boolean);
       return res.status(404).json({
-        message: "No valid slots found for the given date",
-        availableDates: availableDates.length > 0 ? availableDates : ["No available dates found"]
+        message: "No valid slots found for the given date"
       });
     }
 
@@ -1759,6 +1763,17 @@ export const getSingleDiagnosticBooking = async (req, res) => {
       return res.status(404).json({ message: "Booking not found" });
     }
 
+    // Get address details if addressId exists
+    let addressDetails = null;
+    if (booking.addressId) {
+      const staff = await Staff.findById(booking.staffId._id).select("addresses");
+      if (staff) {
+        addressDetails = staff.addresses.find(addr => 
+          addr._id.toString() === booking.addressId.toString()
+        );
+      }
+    }
+
     // Populate cart item details
     if (booking.cartId?.items?.length) {
       const populatedItems = await Promise.all(
@@ -1775,56 +1790,67 @@ export const getSingleDiagnosticBooking = async (req, res) => {
       booking.cartId.items = populatedItems;
     }
 
-    // ✅ Final structured object with reportFile and diagPrescription
-   const bookingDetails = {
-  bookingId: booking._id,
-  diagnosticBookingId: booking.diagnosticBookingId || "", // ✅ Added this line
-  serviceType: booking.serviceType || "",
-  status: booking.status,
-  date: booking.date,
-  timeSlot: booking.timeSlot,
-  totalPrice: booking.totalPrice,
-  discount: booking.discount,
-  payableAmount: booking.payableAmount,
-  transactionId: booking.transactionId,
-  paymentStatus: booking.paymentStatus,
+    // Final structured object with address details
+    const bookingDetails = {
+      bookingId: booking._id,
+      diagnosticBookingId: booking.diagnosticBookingId || "",
+      serviceType: booking.serviceType || "",
+      status: booking.status,
+      date: booking.date,
+      timeSlot: booking.timeSlot,
+      totalPrice: booking.totalPrice,
+      discount: booking.discount,
+      payableAmount: booking.payableAmount,
+      transactionId: booking.transactionId,
+      paymentStatus: booking.paymentStatus,
 
-  diagnostic: booking.diagnosticId
-    ? {
-        name: booking.diagnosticId.name,
-        description: booking.diagnosticId.description,
-        image: booking.diagnosticId.image,
-        homeCollection: booking.diagnosticId.homeCollection,
-        centerVisit: booking.diagnosticId.centerVisit,
-        pincode: booking.diagnosticId.pincode,
-        contactPerson: booking.diagnosticId.contactPersons?.[0] || null, // ✅ added
-      }
-    : null,
+      // Address details (only for Home Collection)
+      address: addressDetails ? {
+        street: addressDetails.street,
+        city: addressDetails.city,
+        state: addressDetails.state,
+        country: addressDetails.country,
+        postalCode: addressDetails.postalCode,
+        addressType: addressDetails.addressType,
+        _id: addressDetails._id
+      } : null,
 
-  package: booking.packageId || null,
+      diagnostic: booking.diagnosticId
+        ? {
+            name: booking.diagnosticId.name,
+            description: booking.diagnosticId.description,
+            image: booking.diagnosticId.image,
+            homeCollection: booking.diagnosticId.homeCollection,
+            centerVisit: booking.diagnosticId.centerVisit,
+            pincode: booking.diagnosticId.pincode,
+            contactPerson: booking.diagnosticId.contactPersons?.[0] || null,
+          }
+        : null,
 
-  patient: booking.familyMemberId
-    ? {
-        name: booking.familyMemberId.name,
-        relation: booking.familyMemberId.relation,
-        age: booking.familyMemberId.age,
-        gender: booking.familyMemberId.gender,
-      }
-    : null,
+      package: booking.packageId || null,
 
-  staff: booking.staffId
-    ? {
-        name: booking.staffId.name,
-        email: booking.staffId.email,
-        contact_number: booking.staffId.contact_number,
-      }
-    : null,
+      patient: booking.familyMemberId
+        ? {
+            name: booking.familyMemberId.name,
+            relation: booking.familyMemberId.relation,
+            age: booking.familyMemberId.age,
+            gender: booking.familyMemberId.gender,
+          }
+        : null,
 
-  cartItems: booking.cartId?.items || [],
+      staff: booking.staffId
+        ? {
+            name: booking.staffId.name,
+            email: booking.staffId.email,
+            contact_number: booking.staffId.contact_number,
+          }
+        : null,
 
-  reportFile: booking.report_file || null,
-  diagPrescription: booking.diagPrescription || null,
-};
+      cartItems: booking.cartId?.items || [],
+
+      reportFile: booking.report_file || null,
+      diagPrescription: booking.diagPrescription || null,
+    };
 
     return res.status(200).json({
       success: true,
@@ -5635,6 +5661,16 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET || "RecEtdcenmR7Lm4AIEwo4KFr",
 });
 
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL,
+    pass: process.env.PASS
+  }
+});
+
+
 export const createDoctorConsultationBookingByAdmin = async (req, res) => {
   try {
     const {
@@ -5815,6 +5851,36 @@ export const createDoctorConsultationBookingByAdmin = async (req, res) => {
 
     if (updated) {
       await doctor.save(); // important: persist updated slots
+    }
+
+
+
+      // 📧 Send Confirmation Email
+    const mailOptions = {
+      from: `"Credent Health" <${process.env.EMAIL}>`,
+      to: staff.email,
+      subject: "Doctor Consultation Booking Confirmed",
+      html: `
+        <h2>Doctor Consultation Confirmed</h2>
+        <p>Hello ${staff.name},</p>
+        <p>Your doctor consultation has been successfully booked.</p>
+        <p><strong>Booking ID:</strong> ${formattedBookingId}</p>
+        <p><strong>Doctor:</strong> ${doctor.name}</p>
+        <p><strong>Date:</strong> ${formattedDate}</p>
+        <p><strong>Time Slot:</strong> ${timeSlot}</p>
+        <p><strong>Type:</strong> ${type}</p>
+        ${meetingLink ? `<p><strong>Meeting Link:</strong> <a href="${meetingLink}">${meetingLink}</a></p>` : ""}
+        <p><strong>Paid Amount:</strong> ₹${consultationFee}</p>
+        <br>
+        <p>Thank you,<br>Team CredentHealth</p>
+      `
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+      console.log("✅ Email sent to:", staff.email);
+    } catch (err) {
+      console.error("❌ Email sending failed:", err);
     }
 
     res.status(201).json({
@@ -6219,6 +6285,35 @@ export const createPackageBookingByAdmin = async (req, res) => {
     });
 
     await staff.save();
+
+
+
+      // Send email like Doctor Booking
+    const mailOptions = {
+      from: `"Credent Health" <${process.env.EMAIL}>`,
+      to: staff.email,
+      subject: "Package Booking Confirmed",
+      html: `
+        <h2>Package Booking Confirmed</h2>
+        <p>Hello ${staff.name},</p>
+        <p>Your package booking has been successfully confirmed.</p>
+        <p><strong>Booking ID:</strong> ${diagnosticBookingId}</p>
+        <p><strong>Package:</strong> ${packageData.name}</p>
+        <p><strong>Date:</strong> ${bookingDate}</p>
+        <p><strong>Time Slot:</strong> ${timeSlot}</p>
+        <p><strong>Service Type:</strong> ${serviceType}</p>
+        <p><strong>Paid Amount:</strong> ₹${payableAmount}</p>
+        <br>
+        <p>Thank you,<br>Team CredentHealth</p>
+      `
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+      console.log("✅ Email sent to:", staff.email);
+    } catch (err) {
+      console.error("❌ Email sending failed:", err);
+    }
 
     // Response
     return res.status(201).json({

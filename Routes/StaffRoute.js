@@ -53,6 +53,8 @@ import { getWalletBalance,
   getHraByStaff,
   getDoctorSlotsByDate,
   getSingleStaffTestPackage,
+  deleteAccount,
+  confirmDeleteAccount,
 
 
 
@@ -153,6 +155,8 @@ router.get("/recent-doctor-booking/:staffId", getRecentDoctorBooking);
 router.get("/recent-package-booking/:staffId", getRecentPackageBooking);
 router.get('/allhracat/:staffId', getHraByStaff);
 router.get("/doctor-slots/:doctorId", getDoctorSlotsByDate);
+router.post('/deleteaccount', deleteAccount)
+router.get('/confirm-delete-account/:token', confirmDeleteAccount);
 
 
 

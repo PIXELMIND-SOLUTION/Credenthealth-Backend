@@ -111,6 +111,11 @@ const bookingSchema = new mongoose.Schema({
     sparse: true, // ✅ makes it optional without collisions
     index: true,
   },
+  addressId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Staff.addresses", // Reference to the address in Staff's addresses array
+    default: null
+  },
 
   // 🗓️ Dates and Time
   date: {

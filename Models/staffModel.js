@@ -36,9 +36,9 @@ const staffSchema = new mongoose.Schema({
   contact_number: {
     type: String,
   },
-  address: {
-    type: String,
-  },
+  // address: {
+  //   type: String,
+  // },
   myBookings: [
     {
       type: mongoose.Schema.Types.ObjectId,
@@ -246,16 +246,16 @@ const staffSchema = new mongoose.Schema({
     },
   ],
 
-  // addresses: [
-  //   {
-  //     street: { type: String },
-  //     city: { type: String },
-  //     state: { type: String },
-  //     country: { type: String },
-  //     postalCode: { type: String },
-  //     addressType: { type: String, enum: ['Home', 'Office', 'Other'], default: 'Home' },
-  //   },
-  // ],
+  addresses: [
+    {
+      street: { type: String },
+      city: { type: String },
+      state: { type: String },
+      country: { type: String },
+      postalCode: { type: String },
+      addressType: { type: String, enum: ['Home', 'Office', 'Other'], default: 'Home' },
+    },
+  ],
 
  steps: [
   {
@@ -276,6 +276,8 @@ const staffSchema = new mongoose.Schema({
       updatedAt: { type: Date, default: Date.now },
     },
   ],
+  deleteToken: { type: String, default: null },
+  deleteTokenExpiration: { type: Date, default: null },
 }, { timestamps: true });
 
 const Staff = mongoose.model('Staff', staffSchema);
