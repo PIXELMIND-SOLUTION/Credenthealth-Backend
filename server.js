@@ -32,6 +32,7 @@ const allowedOrigins = [
   'http://31.97.206.144:3004',
   'http://31.97.206.144:3041',
   'http://localhost:3001',
+  'https://credenthealthdeleteurl.vercel.app'
 ];
 
 // ✅ Socket.IO setup
