@@ -19,7 +19,6 @@ import Package from "../Models/Package.js";
 import HraQuestion from "../Models/HraQuestion.js";
 import Chat from "../Models/Chat.js";
 import ejs from 'ejs';
-import puppeteer from 'puppeteer';  // Import Puppeteer
 import Razorpay from "razorpay";
 import { v4 as uuidv4 } from "uuid";
 import Hra from "../Models/HRA.js";
