@@ -55,11 +55,22 @@ import { getWalletBalance,
   getSingleStaffTestPackage,
   deleteAccount,
   confirmDeleteAccount,
+  rescheduleDoctorConsultation,
+  rescheduleDiagnosticBooking,
+  reschedulePackageBooking,
+  uploadDoctorReport,
+  uploadDoctorPrescription,
+  uploadBookingReport,
+  uploadDiagnosticPrescription,
+  handleUserMedicalUpload,
+  deleteStaff,
+  createSupportTicket,
 
 
 
 
  } from '../Controller/ControllerStaff.js';
+import { uploadDiagnosticReport, uploadDiagPrescription, uploadHelpFile, uploadPrescriptionFile, uploadReportFile, uploadUserMedicalFile } from '../config/multerConfig.js';
 
 const router = express.Router();
 
@@ -157,6 +168,23 @@ router.get('/allhracat/:staffId', getHraByStaff);
 router.get("/doctor-slots/:doctorId", getDoctorSlotsByDate);
 router.post('/deleteaccount', deleteAccount)
 router.get('/confirm-delete-account/:token', confirmDeleteAccount);
+router.put('/reschedulebooking/:staffId/:bookingId', rescheduleDoctorConsultation);
+router.put("/diagreschedule/:staffId/:bookingId", rescheduleDiagnosticBooking);
+router.put("/packagereschedule/:staffId/:bookingId", reschedulePackageBooking);
+router.put('/upload-doctor-report/:staffId/:appointmentId',uploadReportFile,uploadDoctorReport);
+router.put('/upload-doctor-prescription/:staffId/:appointmentId',uploadPrescriptionFile,uploadDoctorPrescription);
+router.put("/upload-booking-report/:staffId/:bookingId",uploadBookingReport);
+router.put("/upload-diagnostic-prescription/:staffId/:bookingId",uploadDiagnosticPrescription);
+// Example route
+router.put(
+  '/userupload/:staffId',
+  uploadUserMedicalFile, // middleware
+  handleUserMedicalUpload
+);
+
+router.delete('/deleteaccount/:staffId', deleteStaff);
+router.post('/support-ticket', uploadHelpFile, createSupportTicket);
+
 
 
 

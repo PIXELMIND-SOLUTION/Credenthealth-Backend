@@ -216,6 +216,16 @@ const staffSchema = new mongoose.Schema({
   }
 ],
 
+ // Staff uploaded reports/prescriptions
+  receivedDoctorReports: {
+    type: [String],
+    default: []
+  },
+  receivedDoctorPrescriptions: {
+    type: [String],
+    default: []
+  },
+
    // 👇 Add Prescription field
    prescription: [
     {
@@ -225,6 +235,10 @@ const staffSchema = new mongoose.Schema({
       createdAt: { type: Date, default: Date.now }
     }
   ],
+  userUploadedFiles: {
+  type: [String],
+  default: []
+},
   myBlogs: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Blog'
@@ -243,6 +257,7 @@ const staffSchema = new mongoose.Schema({
       BP: { type: String },
       sugar: { type: String },
       relation: { type: String },
+      description: { type: String },
     },
   ],
 

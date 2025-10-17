@@ -7,12 +7,18 @@ import path from 'path';
 import http from 'http';
 import { fileURLToPath } from 'url';
 import { Server } from 'socket.io';
+import mongoose from 'mongoose';
 
 import connectDatabase from './db/connectDatabase.js';
 import bookingRoutes from './Routes/bookingRotes.js';
 import adminRoutes from './Routes/AdminRoute.js';
 import staffRoutes from './Routes/StaffRoute.js';
 import DoctorRoute from './Routes/DoctorRoute.js';
+
+import moment from "moment";
+import cron from "node-cron";
+import Doctor from "./Models/doctorModel.js"; // doctor model path adjust करें
+import Diagnostic from './Models/diagnosticModel.js';
 
 dotenv.config();
 
@@ -32,7 +38,10 @@ const allowedOrigins = [
   'http://31.97.206.144:3004',
   'http://31.97.206.144:3041',
   'http://localhost:3001',
-  'https://credenthealthdeleteurl.vercel.app'
+  'https://credenthealthdeleteurl.vercel.app',
+  'http://31.97.206.144:3593',
+  'https://credenthealth.com',
+  'https://healthcare-sage-six.vercel.app'
 ];
 
 // ✅ Socket.IO setup
@@ -114,6 +123,157 @@ io.on('connection', (socket) => {
   });
 });
 
+
+
+
+// // Immediate log on server start
+// console.log(
+//   `[${moment().format("YYYY-MM-DD HH:mm:ss")}] ⏰ Daily doctor slots will be created at 11:00 AM every day.`
+// );
+
+// // Slot generator function
+// const generateDailySlots = () => {
+//   const slots = [];
+//   const startHour = 9; // 9 AM
+//   const endHour = 23;  // 11 PM
+//   const intervalMinutes = 30;
+//   const date = moment().format("YYYY-MM-DD");
+//   const day = moment().format("dddd");
+
+//   for (let hour = startHour; hour < endHour; hour++) {
+//     for (let min = 0; min < 60; min += intervalMinutes) {
+//       const time = `${hour.toString().padStart(2, "0")}:${min
+//         .toString()
+//         .padStart(2, "0")}`;
+//       slots.push({ day, date, timeSlot: time, isBooked: false });
+//     }
+//   }
+//   return slots;
+// };
+
+// // Function to process all doctors
+// const createDoctorSlots = async () => {
+//   console.log(
+//     `[${moment().format("YYYY-MM-DD HH:mm:ss")}] 🚀 Creating doctor slots now...`
+//   );
+//   try {
+//     const doctors = await Doctor.find({});
+//     if (!doctors.length) {
+//       console.log("⚠️ No doctors found for slots generation.");
+//       return;
+//     }
+
+//     let createdCount = 0;
+//     let skippedCount = 0;
+
+//     for (const doctor of doctors) {
+//       const onlineBefore = doctor.onlineSlots.length;
+//       const offlineBefore = doctor.offlineSlots.length;
+
+//       if (
+//         doctor.consultation_type === "Online" ||
+//         doctor.consultation_type === "Both"
+//       ) {
+//         doctor.onlineSlots = generateDailySlots();
+//       }
+//       if (
+//         doctor.consultation_type === "Offline" ||
+//         doctor.consultation_type === "Both"
+//       ) {
+//         doctor.offlineSlots = generateDailySlots();
+//       }
+
+//       await doctor.save();
+//       createdCount++;
+
+//       if (
+//         onlineBefore === doctor.onlineSlots.length &&
+//         offlineBefore === doctor.offlineSlots.length
+//       ) {
+//         skippedCount++;
+//       }
+
+//       console.log(`✅ Slots processed for Dr. ${doctor.name}`);
+//     }
+
+//     // ✨ Success log with today's date and day
+//     const today = moment().format("YYYY-MM-DD");
+//     const todayDay = moment().format("dddd");
+//     console.log(
+//       `🎉 Doctor slots generation completed. Total doctors processed: ${createdCount}, Skipped: ${skippedCount}`
+//     );
+//     console.log(`✅ Slots created successfully for ${today} (${todayDay})`);
+//   } catch (err) {
+//     console.error("❌ Error generating doctor slots:", err);
+//   }
+// };
+
+// // 🔹 Sirf schedule par chalega (11:00 AM daily)
+// cron.schedule("0 11 * * *", createDoctorSlots);
+
+
+
+// // Immediate log for Diagnostics
+// console.log(
+//   `[${moment().format("YYYY-MM-DD HH:mm:ss")}] ⏰ Daily diagnostic slots will be created at 11:30 AM every day.`
+// );
+
+// // Diagnostic slots cron (11:30 AM)
+// cron.schedule("30 11 * * *", async () => {
+//   console.log(
+//     `[${moment().format("YYYY-MM-DD HH:mm:ss")}] 🔔 Daily diagnostic slots generation started...`
+//   );
+
+//   try {
+//     const diagnostics = await Diagnostic.find({});
+//     if (!diagnostics.length) {
+//       console.log("⚠️ No diagnostic centers found for slots generation.");
+//       return;
+//     }
+
+//     // Function to generate diagnostic slots
+//     const generateDailySlots = (type) => {
+//       const slots = [];
+//       const startHour = 7; // 7 AM
+//       const endHour = 10; // 10 AM
+//       const intervalMinutes = 60; // 1 hour
+//       const daysToGenerate = 7; // slots for next 7 days
+
+//       for (let i = 0; i < daysToGenerate; i++) {
+//         const dateObj = moment().add(i, "days");
+//         const day = dateObj.format("dddd");
+//         const date = dateObj.format("YYYY-MM-DD");
+
+//         for (let hour = startHour; hour <= endHour; hour++) {
+//           const time = `${hour.toString().padStart(2, "0")}:00`;
+//           slots.push({ day, date, timeSlot: time, type, isBooked: false });
+//         }
+//       }
+//       return slots;
+//     };
+
+//     let processedCount = 0;
+
+//     for (const diagnostic of diagnostics) {
+//       // Generate slots
+//       diagnostic.homeCollectionSlots = generateDailySlots("Home Collection");
+//       diagnostic.centerVisitSlots = generateDailySlots("Center Visit");
+
+//       await diagnostic.save();
+//       processedCount++;
+//       console.log(`✅ Slots generated for ${diagnostic.name}`);
+//     }
+
+//     // ✅ Final success log
+//     const today = moment().format("YYYY-MM-DD");
+//     const todayDay = moment().format("dddd");
+//     console.log(
+//       `🎉 Daily diagnostic slots generation completed for ${today} (${todayDay}). Total diagnostics processed: ${processedCount}`
+//     );
+//   } catch (err) {
+//     console.error("❌ Error generating diagnostic slots:", err);
+//   }
+// });
 // ✅ Start the server
 const PORT = process.env.PORT || 6060;
 server.listen(PORT, '0.0.0.0', () => {

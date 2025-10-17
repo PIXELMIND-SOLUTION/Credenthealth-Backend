@@ -140,6 +140,16 @@ import {
     deleteHraQuestion,
     updateMeetingLink,
     bulkUploadStaffProfiles,
+    getAllStaffMedicalUploads,
+    createEmployee,
+    getEmployees,
+    loginEmployee,
+    updateEmployee,
+    deleteEmployee,
+    uploadBannerController,
+    getAllBannerImagesController,
+    deleteBannerImageController,
+    updateBannerImageController,
 } from '../Controller/ControllerAdmin.js';
 import multer from 'multer';
 import { uploadBlogImage, uploadCategoryCSV, uploadCategoryImage, uploadCompanyCSV, uploadDiagnosticImage, uploadImages, uploadPackageCSV, uploadPrescriptionFile, uploadReportFile, uploadTestCSV, uploadTestImage, uploadXrayCSV, uploadXrayImage } from '../config/multerConfig.js';
@@ -239,6 +249,7 @@ router.get('/rejectedappointments', getRejectedDoctorAppointments);
 
 router.get('/accepteddiagnosticbooking', getAcceptedDiagnosticAppointments);
 router.get('/rejecteddiagnosticbooking', getRejectedDiagnosticAppointments);
+
 
 
 
@@ -396,6 +407,27 @@ router.post('/upload-pkgcsv/:diagnosticId', uploadPackageCSV, bulkUploadPackages
 
 router.post('/upload-xray-csv/:diagnosticId', uploadXrayCSV, importXrayCSV);
 router.put('/updatemeetinglink/:id', updateMeetingLink);
+
+router.get('/staffallmedical-uploads', getAllStaffMedicalUploads);
+router.post('/create-employee', createEmployee);
+router.put('/updateemployee/:id', updateEmployee);
+router.delete('/deleteemployee/:id', deleteEmployee);
+router.get('/getallemployees', getEmployees);
+router.post('/emplogin', loginEmployee);
+
+
+
+// Route for banner image upload (single or multiple)
+router.post('/uploadbanner', uploadBannerController);
+
+// Route for fetching all uploaded banner images
+router.get('/getbanners', getAllBannerImagesController);
+// Route to delete a banner by ID
+router.delete('/delete-banner/:bannerId', deleteBannerImageController);
+
+// Route to update a banner image by ID
+router.put('/update-banner/:bannerId', updateBannerImageController);
+
 
 
 

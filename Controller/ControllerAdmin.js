@@ -2,7 +2,7 @@ import Admin from '../Models/Admin.js';
 import generateToken from '../config/jwtToken.js';
 import Staff from '../Models/staffModel.js';
 import Doctor from '../Models/doctorModel.js';
-import { uploadDocuments, uploadTestImages, uploadCompanyAssets, uploadStaffImages, uploadDoctorImage, uploadCategoryImage, uploadDiagnosticReport, uploadDiagPrescription, uploadStaffProfile } from '../config/multerConfig.js';
+import { uploadDocuments, uploadTestImages, uploadCompanyAssets, uploadStaffImages, uploadDoctorImage, uploadCategoryImage, uploadDiagnosticReport, uploadDiagPrescription, uploadStaffProfile, uploadBlogImage, uploadBannerImages } from '../config/multerConfig.js';
 import Booking from '../Models/bookingModel.js';
 import Appointment from '../Models/Appointment.js';
 import Company from '../Models/companyModel.js';
@@ -30,6 +30,9 @@ import Razorpay from 'razorpay';
 import dotenv from 'dotenv'
 import nodemailer from "nodemailer";
 import moment from "moment-timezone";
+import cron from "node-cron";
+import Employee from '../Models/Employee.js';
+import Banner from '../Models/Banner.js';
 
 
 dotenv.config();
@@ -109,6 +112,7 @@ export const loginAdmin = async (req, res) => {
         adminId: admin._id,  // Added adminId
         name: admin.name,
         email: admin.email,
+        role: admin.role
       },
     });
   } catch (error) {
@@ -798,8 +802,8 @@ export const assignDiagnosticAndPackageToStaff = async (req, res) => {
 
 
 export const updateDiagnosticDetails = async (req, res) => {
-    try {
-   
+  try {
+
 
     const { id } = req.params;
     const updateData = req.body;
@@ -841,9 +845,9 @@ export const updateDiagnosticDetails = async (req, res) => {
 
   } catch (error) {
     console.error('Error updating diagnostic center:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error updating diagnostic center',
-      error: error.message 
+      error: error.message
     });
   }
 };
@@ -1088,6 +1092,111 @@ export const addAmountToWallet = async (req, res) => {
 
 
 
+// ✅ Slot Generation Function
+const generateDefaultSlots = () => {
+  const slots = [];
+
+  for (let i = 0; i < 7; i++) {
+    const dateObj = moment().add(i, "days");
+    const day = dateObj.format("dddd"); // e.g., Monday
+    const date = dateObj.format("YYYY-MM-DD"); // e.g., 2025-08-23
+
+    let startTime = moment(date + " 09:00", "YYYY-MM-DD HH:mm");
+    const endTime = moment(date + " 23:00", "YYYY-MM-DD HH:mm");
+
+    while (startTime.isBefore(endTime)) {
+      slots.push({
+        day,
+        date,
+        timeSlot: startTime.format("HH:mm"),
+        isBooked: false,
+      });
+      startTime.add(30, "minutes"); // ⏰ half-hour gap
+    }
+  }
+
+  return slots;
+};
+
+
+// ✅ Check the next Sunday function
+const getNextSunday = () => {
+  const today = moment();
+  const daysUntilSunday = (7 - today.day()) % 7;  // Calculate how many days until Sunday
+  const nextSunday = today.add(daysUntilSunday, 'days').startOf('day').add(1, 'day'); // Next Sunday at 12 AM
+  return nextSunday;
+};
+
+// ✅ Countdown Cron Job: Remind users daily about the upcoming slot generation
+const countdownCronJob = () => {
+  setInterval(() => {
+    const nextSunday = getNextSunday();
+    const daysLeft = nextSunday.diff(moment(), 'days');
+    console.log(`⏳ ${daysLeft} days left until new slots are generated on Sunday!`);
+  }, 86400000);  // Runs every 24 hours (86400000 ms)
+};
+
+// Start countdown job
+countdownCronJob();
+
+
+
+// ✅ Weekly Slot Generation Cron Job
+const weeklySlotCronJob = () => {
+  const interval = setInterval(async () => {
+    const currentDay = moment().day(); // Get current day (0 = Sunday, 1 = Monday, etc.)
+    
+    if (currentDay === 0) {  // Check if today is Sunday
+      console.log("🌟 Cron job triggered! It's Sunday! Generating slots...");
+
+      try {
+        // Assuming you have a Doctor model and using async-await to fetch doctors
+        const doctors = await Doctor.find();  // Replace with actual Doctor fetch method
+
+        for (const doc of doctors) {
+          const newSlots = generateDefaultSlots();  // Generate slots for the next week
+
+          // Update the doctor's slots based on consultation type
+          if (doc.consultation_type === 'Online' || doc.consultation_type === 'Both') {
+            doc.onlineSlots.push(...newSlots);  // Add new slots to onlineSlots
+          }
+
+          if (doc.consultation_type === 'Offline' || doc.consultation_type === 'Both') {
+            doc.offlineSlots.push(...newSlots);  // Add new slots to offlineSlots
+          }
+
+          await doc.save();  // Save the updated doctor
+
+          // Log the doctor and their newly added slots
+          console.log(`✅ Weekly slots auto-generated for Dr. ${doc.name}`);
+          console.log(`🗓 New slots generated for the upcoming week for Dr. ${doc.name} (${doc.consultation_type} consultation)`);
+        }
+      } catch (err) {
+        console.error('❌ Error generating weekly doctor slots:', err);
+      }
+    } else {
+      console.log(`⏳ Not Sunday, so no new slots generated today!`);
+    }
+  }, 86400000);  // Check every day (86400000 ms) to see if it's Sunday
+};
+
+// Start the weekly cron job
+weeklySlotCronJob();
+
+
+// ✅ Countdown function to show remaining days until Sunday slot generation
+const showCountdown = () => {
+  const nextSunday = getNextSunday();
+  const daysLeft = nextSunday.diff(moment(), 'days');
+  console.log(`⏳ ${daysLeft} days left until new doctor slots are generated on Sunday!`);
+};
+
+// Check remaining days until next Sunday (for testing)
+showCountdown();
+
+
+
+// ✅ Create Doctor Controller
 export const createDoctor = async (req, res) => {
   try {
     uploadDoctorImage(req, res, async (err) => {
@@ -1121,17 +1230,25 @@ export const createDoctor = async (req, res) => {
 
       const documents = req.files?.documents?.map((doc) => `/uploads/doctorimages/${doc.filename}`) || [];
 
-      // 🧠 Parse slots from stringified JSON (Postman form-data)
+      // Parse or fallback to default slots if none are provided
       let parsedOnlineSlots = [];
       let parsedOfflineSlots = [];
 
       try {
         if (consultation_type === 'Online' || consultation_type === 'Both') {
-          parsedOnlineSlots = onlineSlots ? JSON.parse(onlineSlots) : [];
+          parsedOnlineSlots = onlineSlots ? JSON.parse(onlineSlots) : generateDefaultSlots();
         }
 
         if (consultation_type === 'Offline' || consultation_type === 'Both') {
-          parsedOfflineSlots = offlineSlots ? JSON.parse(offlineSlots) : [];
+          parsedOfflineSlots = offlineSlots ? JSON.parse(offlineSlots) : generateDefaultSlots();
+        }
+
+        if (consultation_type === 'Online' && !onlineSlots) {
+          parsedOnlineSlots = generateDefaultSlots();
+        }
+
+        if (consultation_type === 'Offline' && !offlineSlots) {
+          parsedOfflineSlots = generateDefaultSlots();
         }
       } catch (err) {
         return res.status(400).json({ message: 'Invalid slot JSON format', error: err.message });
@@ -1163,8 +1280,6 @@ export const createDoctor = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
-
-
 
 export const updateDoctors = async (req, res) => {
   try {
@@ -1458,13 +1573,14 @@ export const getDoctorSlotsByDate = async (req, res) => {
       slots = [...(doctor.onlineSlots || []), ...(doctor.offlineSlots || [])];
     }
 
-    // Filter slots by date and remove expired slots
+    // Filter slots by date, exclude expired and booked slots
     const filteredSlots = (slots || [])
       .filter(slot => slot.date === formattedDate)
       .filter(slot => {
         const slotDateTime = moment.tz(`${slot.date} ${slot.timeSlot}`, "YYYY-MM-DD HH:mm", "Asia/Kolkata");
         return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
       })
+      .filter(slot => !slot.isBooked) // exclude booked slots
       .map(slotDoc => {
         const slot = typeof slotDoc.toObject === "function" ? slotDoc.toObject() : slotDoc;
         return {
@@ -1644,6 +1760,7 @@ export const getAllDiagnosticBookingsForAdmin = async (req, res) => {
       diagnostic_name: booking.diagnosticId?.name || '',
       diagnostic_image: booking.diagnosticId?.image || '',
       diagnostic_address: booking.diagnosticId?.address || '',
+      staffId: booking.staffId || '',
       staff_name: booking.staffId?.name || '',
       family_member: {
         name: booking.familyMemberId?.name || '',
@@ -1768,7 +1885,7 @@ export const getSingleDiagnosticBooking = async (req, res) => {
     if (booking.addressId) {
       const staff = await Staff.findById(booking.staffId._id).select("addresses");
       if (staff) {
-        addressDetails = staff.addresses.find(addr => 
+        addressDetails = staff.addresses.find(addr =>
           addr._id.toString() === booking.addressId.toString()
         );
       }
@@ -1790,7 +1907,7 @@ export const getSingleDiagnosticBooking = async (req, res) => {
       booking.cartId.items = populatedItems;
     }
 
-    // Final structured object with address details
+    // Final structured object with address details + received reports/prescriptions
     const bookingDetails = {
       bookingId: booking._id,
       diagnosticBookingId: booking.diagnosticBookingId || "",
@@ -1817,39 +1934,43 @@ export const getSingleDiagnosticBooking = async (req, res) => {
 
       diagnostic: booking.diagnosticId
         ? {
-            name: booking.diagnosticId.name,
-            description: booking.diagnosticId.description,
-            image: booking.diagnosticId.image,
-            homeCollection: booking.diagnosticId.homeCollection,
-            centerVisit: booking.diagnosticId.centerVisit,
-            pincode: booking.diagnosticId.pincode,
-            contactPerson: booking.diagnosticId.contactPersons?.[0] || null,
-          }
+          name: booking.diagnosticId.name,
+          description: booking.diagnosticId.description,
+          image: booking.diagnosticId.image,
+          homeCollection: booking.diagnosticId.homeCollection,
+          centerVisit: booking.diagnosticId.centerVisit,
+          pincode: booking.diagnosticId.pincode,
+          contactPerson: booking.diagnosticId.contactPersons?.[0] || null,
+        }
         : null,
 
       package: booking.packageId || null,
 
       patient: booking.familyMemberId
         ? {
-            name: booking.familyMemberId.name,
-            relation: booking.familyMemberId.relation,
-            age: booking.familyMemberId.age,
-            gender: booking.familyMemberId.gender,
-          }
+          name: booking.familyMemberId.name,
+          relation: booking.familyMemberId.relation,
+          age: booking.familyMemberId.age,
+          gender: booking.familyMemberId.gender,
+        }
         : null,
 
       staff: booking.staffId
         ? {
-            name: booking.staffId.name,
-            email: booking.staffId.email,
-            contact_number: booking.staffId.contact_number,
-          }
+          name: booking.staffId.name,
+          email: booking.staffId.email,
+          contact_number: booking.staffId.contact_number,
+        }
         : null,
 
       cartItems: booking.cartId?.items || [],
 
       reportFile: booking.report_file || null,
       diagPrescription: booking.diagPrescription || null,
+
+      // ✅ New fields for staff/doctor uploads
+      receivedDiagReports: booking.receivedDiagReports || [],
+      receivedDiagPrescriptions: booking.receivedDiagPrescriptions || []
     };
 
     return res.status(200).json({
@@ -1988,6 +2109,7 @@ export const getAllDoctorAppointments = async (req, res) => {
         doctor_name: booking.doctorId?.name,
         doctor_specialization: booking.doctorId?.specialization,
         doctor_image: booking.doctorId?.image,
+        staffId: booking.staffId,
         staff_name: booking.staffId?.name,
         appointment_date: booking.bookedSlot?.date,
         time_slot: booking.bookedSlot?.timeSlot,
@@ -2288,7 +2410,7 @@ export const getSingleDoctorAppointment = async (req, res) => {
         select: 'name',
       })
       .select(
-        'doctorId doctorConsultationBookingId staffId familyMemberId bookedSlot totalPrice status meetingLink type discount payableAmount createdAt doctorReports doctorPrescriptions transactionId paymentStatus'
+        'doctorId doctorConsultationBookingId staffId familyMemberId bookedSlot totalPrice status meetingLink type discount payableAmount createdAt doctorReports doctorPrescriptions receivedDoctorReports receivedDoctorPrescriptions transactionId paymentStatus'
       );
 
     if (!booking) {
@@ -2311,8 +2433,10 @@ export const getSingleDoctorAppointment = async (req, res) => {
         total_price: booking.totalPrice,
         discount: booking.discount,
         payable_amount: booking.payableAmount,
-        doctor_reports: booking.doctorReports,  // ✅ SHOW REPORTS HERE
-        doctor_prescriptions: booking.doctorPrescriptions, // ✅ Added
+        doctor_reports: booking.doctorReports,
+        doctor_prescriptions: booking.doctorPrescriptions,
+        receivedDoctorReports: booking.receivedDoctorReports || [],        // ✅ Added
+        receivedDoctorPrescriptions: booking.receivedDoctorPrescriptions || [], // ✅ Added
         doctorConsultationBookingId: booking.doctorConsultationBookingId,
         transactionId: booking.transactionId,
         paymentStatus: booking.paymentStatus,
@@ -2348,41 +2472,41 @@ export const getDoctorAppointments = async (req, res) => {
     const doctor = await Doctor.findById(doctorId).select('name specialization image').lean();
 
     // Map full booking data + doctor & staff info
-   const appointments = bookings.map(bk => ({
-  appointmentId: bk._id,
-  doctor_id: doctorId,
-  doctor_name: doctor?.name || "N/A",
-  doctor_specialization: doctor?.specialization || "N/A",
-  doctor_image: doctor?.image || null,
-  
-  // ✅ FIXED THIS:
-  staffId: bk.staffId?._id || null,
-  staff_name: bk.staffId?.name || "N/A",
-  
-  familyMemberId: bk.familyMemberId || null,
-  serviceType: bk.serviceType || null,
-  isBooked: bk.isBooked,
-  bookedSlot: bk.bookedSlot || {},
-  type: bk.type,
-  meetingLink: bk.meetingLink || null,
-  transactionId: bk.transactionId || null,
-  paymentStatus: bk.paymentStatus || null,
-  paymentDetails: bk.paymentDetails || {},
-  isSuccessfull: bk.isSuccessfull,
-  discount: bk.discount || 0,
-  payableAmount: bk.payableAmount || 0,
-  totalPrice: bk.totalPrice || 0,
-  status: bk.status,
-  doctorConsultationBookingId: bk.doctorConsultationBookingId || null,
-  date: bk.date,
-  timeSlot: bk.timeSlot,
-  createdAt: bk.createdAt,
-  updatedAt: bk.updatedAt,
-  report_file: bk.report_file || null,
-  diagPrescription: bk.diagPrescription || null,
-  doctorReports: bk.doctorReports || [],
-  doctorPrescriptions: bk.doctorPrescriptions || [],
-}));
+    const appointments = bookings.map(bk => ({
+      appointmentId: bk._id,
+      doctor_id: doctorId,
+      doctor_name: doctor?.name || "N/A",
+      doctor_specialization: doctor?.specialization || "N/A",
+      doctor_image: doctor?.image || null,
+
+      // ✅ FIXED THIS:
+      staffId: bk.staffId?._id || null,
+      staff_name: bk.staffId?.name || "N/A",
+
+      familyMemberId: bk.familyMemberId || null,
+      serviceType: bk.serviceType || null,
+      isBooked: bk.isBooked,
+      bookedSlot: bk.bookedSlot || {},
+      type: bk.type,
+      meetingLink: bk.meetingLink || null,
+      transactionId: bk.transactionId || null,
+      paymentStatus: bk.paymentStatus || null,
+      paymentDetails: bk.paymentDetails || {},
+      isSuccessfull: bk.isSuccessfull,
+      discount: bk.discount || 0,
+      payableAmount: bk.payableAmount || 0,
+      totalPrice: bk.totalPrice || 0,
+      status: bk.status,
+      doctorConsultationBookingId: bk.doctorConsultationBookingId || null,
+      date: bk.date,
+      timeSlot: bk.timeSlot,
+      createdAt: bk.createdAt,
+      updatedAt: bk.updatedAt,
+      report_file: bk.report_file || null,
+      diagPrescription: bk.diagPrescription || null,
+      doctorReports: bk.doctorReports || [],
+      doctorPrescriptions: bk.doctorPrescriptions || [],
+    }));
 
     res.status(200).json({
       message: `Appointments for Doctor ${doctor?.name || doctorId} fetched successfully`,
@@ -2447,19 +2571,19 @@ export const createCompany = (req, res) => {
 
       const formattedContactPersons = Array.isArray(parsedContactPersons)
         ? parsedContactPersons.map(person => ({
-            name: person?.name,
-            designation: person?.designation,
-            gender: person?.gender,
-            email: person?.email,
-            phone: person?.phone,
-            address: {
-              country: person?.address?.country,
-              state: person?.address?.state,
-              city: person?.address?.city,
-              pincode: person?.address?.pincode,
-              street: person?.address?.street || "Not Provided",
-            },
-          }))
+          name: person?.name,
+          designation: person?.designation,
+          gender: person?.gender,
+          email: person?.email,
+          phone: person?.phone,
+          address: {
+            country: person?.address?.country,
+            state: person?.address?.state,
+            city: person?.address?.city,
+            pincode: person?.address?.pincode,
+            street: person?.address?.street || "Not Provided",
+          },
+        }))
         : [];
 
       // ✅ Create company document
@@ -2602,7 +2726,7 @@ export const uploadCompaniesFromCSV = async (req, res) => {
       insertedCompanies.push(newCompany);
     }
 
-    fs.unlink(filePath, () => {}); // Optional cleanup
+    fs.unlink(filePath, () => { }); // Optional cleanup
 
     res.status(201).json({
       message: "Companies uploaded from CSV successfully",
@@ -2922,7 +3046,7 @@ export const uploadCategoriesFromCSV = async (req, res) => {
       categories: insertedCategories,
     });
 
-    fs.unlink(filePath, () => {}); // Optional: delete after success
+    fs.unlink(filePath, () => { }); // Optional: delete after success
   } catch (error) {
     console.error("CSV Upload Error:", error);
     res.status(500).json({ message: "Error uploading from CSV" });
@@ -3698,36 +3822,102 @@ function parseJsonField(field) {
 
 export const getDashboardCounts = async (req, res) => {
   try {
-    const companyCount = await Company.countDocuments();
-    const diagnosticCount = await Diagnostic.countDocuments();
-    const appointmentCount = await Booking.countDocuments({ isBooked: true }); // Appointments from Booking model
-    const bookingCount = await Booking.countDocuments();
-    const staffCount = await Staff.countDocuments();
-    const doctorCount = await Doctor.countDocuments();
-    const hraCount = await Hra.countDocuments(); // Count from Hra collection
+    // 1. Get counts in parallel
+    const [
+      companyCount,
+      diagnosticCount,
+      appointmentCount,
+      bookingCount,
+      staffCount,
+      doctorCount,
+      hraCount
+    ] = await Promise.all([
+      Company.countDocuments(),
+      Diagnostic.countDocuments(),
+      Booking.countDocuments({ isBooked: true, type: "doctor" }),
+      Booking.countDocuments({ type: "diagnostic" }),
+      Staff.countDocuments(),
+      Doctor.countDocuments(),
+      Hra.countDocuments()
+    ]);
 
+    // 2. Get chart data (last 5 months)
+    const now = new Date();
+    const fiveMonthsAgo = new Date();
+    fiveMonthsAgo.setMonth(now.getMonth() - 4);
+
+    const pipeline = [
+      {
+        $match: {
+          createdAt: { $gte: fiveMonthsAgo },
+          isBooked: true,
+        },
+      },
+      {
+        $project: {
+          month: { $month: "$createdAt" },
+          year: { $year: "$createdAt" },
+          type: 1,
+        },
+      },
+      {
+        $group: {
+          _id: { month: "$month", year: "$year" },
+          doctor: {
+            $sum: {
+              $cond: [{ $eq: ["$type", "doctor"] }, 1, 0],
+            },
+          },
+          diagnostic: {
+            $sum: {
+              $cond: [{ $eq: ["$type", "diagnostic"] }, 1, 0],
+            },
+          },
+        },
+      },
+      {
+        $sort: { "_id.year": 1, "_id.month": 1 },
+      },
+    ];
+
+    const chartResults = await Booking.aggregate(pipeline);
+
+    const monthNames = [
+      "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    ];
+
+    const chartData = chartResults.map((entry) => ({
+      name: `${monthNames[entry._id.month]}`,
+      doctor: entry.doctor,
+      diagnostic: entry.diagnostic,
+    }));
+
+    // 3. Return full dashboard data
     res.status(200).json({
       success: true,
       data: {
-        companies: companyCount,
-        diagnostics: diagnosticCount,
-        appointments: appointmentCount,
-        bookings: bookingCount,
-        staff: staffCount,
-        doctors: doctorCount,
-        hra: hraCount
-      },
+        counts: {
+          companies: companyCount,
+          diagnostics: diagnosticCount,
+          appointments: appointmentCount,
+          bookings: bookingCount,
+          staff: staffCount,
+          doctors: doctorCount,
+          hra: hraCount
+        },
+        chart: chartData
+      }
     });
   } catch (error) {
-    console.error("Error fetching counts:", error);
+    console.error("Error fetching dashboard data:", error);
     res.status(500).json({
       success: false,
-      message: "Server error while fetching counts",
-      error: error.message,
+      message: "Server error while fetching dashboard data",
+      error: error.message
     });
   }
 };
-
 
 // Helper function to map age group to range (3-year intervals)
 const getAgeRange = (ageGroup) => {
@@ -3758,55 +3948,54 @@ const getAgeRange = (ageGroup) => {
 
 export const addTestsToStaffByAgeGroup = async (req, res) => {
   try {
-    const { ageGroup, diagnostics } = req.body;
+    const { ageGroup, diagnostics, applyToAllStaff } = req.body;
 
-    // ✅ Step 1: Parse the ageGroup string (e.g., "20-23") into min and max age
-    const [minAgeStr, maxAgeStr] = ageGroup.split('-');
-    const minAge = parseInt(minAgeStr);
-    const maxAge = parseInt(maxAgeStr);
+    let staffMembers = [];
 
-    if (isNaN(minAge) || isNaN(maxAge)) {
-      return res.status(400).json({ message: 'Invalid age group format. Use format like "20-23".' });
+    // ✅ Step 1: Staff fetch logic
+    if (applyToAllStaff) {
+      staffMembers = await Staff.find({});
+    } else {
+      if (!ageGroup || !ageGroup.includes("-")) {
+        return res.status(400).json({ message: 'Invalid or missing age group. Use format like "20-30".' });
+      }
+
+      const [minAgeStr, maxAgeStr] = ageGroup.split('-');
+      const minAge = parseInt(minAgeStr);
+      const maxAge = parseInt(maxAgeStr);
+
+      if (isNaN(minAge) || isNaN(maxAge)) {
+        return res.status(400).json({ message: 'Invalid age group format. Use format like "20-30".' });
+      }
+
+      staffMembers = await Staff.find({ age: { $gte: minAge, $lte: maxAge } });
+
+      if (staffMembers.length === 0) {
+        return res.status(404).json({ message: 'No staff found for the given age group.' });
+      }
     }
 
-    // ✅ Step 2: Find staff members within the given age range
-    const staffMembers = await Staff.find({ age: { $gte: minAge, $lte: maxAge } });
-
-    if (staffMembers.length === 0) {
-      return res.status(404).json({ message: 'No staff members found in the specified age group.' });
-    }
-
-    // ✅ Step 3: Extract all diagnostic IDs and find corresponding documents
+    // ✅ Step 2: Validate diagnostic + package existence
     const diagnosticIds = diagnostics.map(d => d.diagnosticId);
     const diagnosticDocs = await Diagnostic.find({ _id: { $in: diagnosticIds } });
 
-    // ✅ Handle missing diagnostics gracefully
-    const missingDiagnosticIds = diagnosticIds.filter(diagnosticId => 
-      !diagnosticDocs.some(doc => doc._id.toString() === diagnosticId.toString())
-    );
-
-    if (missingDiagnosticIds.length > 0) {
-      console.warn('Missing diagnostics:', missingDiagnosticIds);
-    }
-
-    // If there are no diagnostics at all, return a specific message
     if (diagnosticDocs.length === 0) {
       return res.status(404).json({ message: 'No diagnostics found matching the provided IDs.' });
     }
 
-    // ✅ Step 4: Loop through each staff member and add selected packages
+    // ✅ Step 3: Loop through each staff member and assign packages
     for (const staff of staffMembers) {
       let updated = false;
 
       for (const diagnostic of diagnostics) {
         const matchedDiagnostic = diagnosticDocs.find(d => d._id.toString() === diagnostic.diagnosticId);
-        if (!matchedDiagnostic) continue; // Skip this diagnostic if not found
+        if (!matchedDiagnostic) continue;
 
         const selectedPackageIds = Array.isArray(diagnostic.packageIds) ? diagnostic.packageIds : [];
 
         for (const pkgId of selectedPackageIds) {
           const matchedPackage = matchedDiagnostic.packages.find(pkg => pkg._id.toString() === pkgId);
-          if (!matchedPackage) continue; // Skip if no package is found
+          if (!matchedPackage) continue;
 
           const alreadyExists = staff.myPackages.some(p =>
             p.diagnosticId.toString() === matchedDiagnostic._id.toString() &&
@@ -3830,12 +4019,16 @@ export const addTestsToStaffByAgeGroup = async (req, res) => {
       if (updated) await staff.save();
     }
 
-    res.status(200).json({ message: 'Packages successfully added to all matching staff members.' });
+    res.status(200).json({
+      message: `Packages assigned to ${applyToAllStaff ? 'all staff' : 'staff within age group'} successfully.`
+    });
+
   } catch (error) {
     console.error('Error in addTestsToStaffByAgeGroup:', error);
     res.status(500).json({ message: 'Internal server error', error });
   }
 };
+
 
 
 
@@ -4537,7 +4730,7 @@ export const updatePackage = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
- 
+
 
 
 export const deletePackage = async (req, res) => {
@@ -4857,8 +5050,12 @@ export const getXrayById = async (req, res) => {
 
 //diagnostic
 
+// ✅ Create Diagnostic Center Controller
 export const createDiagnostic = async (req, res) => {
   try {
+    // Log incoming request body
+    console.log("✅ Incoming request to create diagnostic center:", req.body);
+
     const {
       name, email, password, phone, address, centerType, methodology,
       pathologyAccredited, gstNumber, centerStrength,
@@ -4868,102 +5065,82 @@ export const createDiagnostic = async (req, res) => {
       description,
     } = req.body;
 
-    // 🔍 Helper to parse stringified JSON fields
-    const parseJsonField = (field, fieldName) => {
-      if (!field) return [];
-      if (typeof field === "string") {
-        try {
-          return JSON.parse(field);
-        } catch (err) {
-          console.error(`Failed to parse ${fieldName}:`, err.message);
-          return [];
-        }
-      }
-      return field;
-    };
+    console.log("✅ Diagnostic Center Details:", {
+      name,
+      email,
+      phone,
+      address,
+      centerType,
+      visitType,
+      description,
+    });
 
-    // ✅ Parse fields
-    const parsedContacts = parseJsonField(contactPersons, "contactPersons");
-    const parsedTests = parseJsonField(tests, "tests");
-    const parsedPackages = parseJsonField(packages, "packages");
-    const parsedScans = parseJsonField(scans, "scans");
-    const parsedHomeSlots = parseJsonField(homeCollectionSlots, "homeCollectionSlots");
-    const parsedCenterSlots = parseJsonField(centerVisitSlots, "centerVisitSlots");
+    // ✅ Parse diagnostic fields or use default slots for diagnostic center
+    const parsedContacts = parseJsonFieldDiagnostic(contactPersons, "contactPersons");
+    const parsedTests = parseJsonFieldDiagnostic(tests, "tests");
+    const parsedPackages = parseJsonFieldDiagnostic(packages, "packages");
+    const parsedScans = parseJsonFieldDiagnostic(scans, "scans");
 
-    // 📸 Handle uploaded images
+    const parsedHomeSlots = homeCollectionSlots
+      ? parseJsonFieldDiagnostic(homeCollectionSlots, "homeCollectionSlots")
+      : generateDefaultSlotsDiagnostic();
+
+    const parsedCenterSlots = centerVisitSlots
+      ? parseJsonFieldDiagnostic(centerVisitSlots, "centerVisitSlots")
+      : generateDefaultSlotsDiagnostic();
+
+    // 📸 Handle uploaded images for diagnostic center
     const files = req.files || [];
-    
-    // First image for diagnostic center
     const diagnosticImage = files[0] ? `/uploads/diagnostic-images/${files[0].filename}` : null;
-
-    // Second image (X-ray)
     const xrayImage = files[1] ? `/uploads/xray-images/${files[1].filename}` : null;
 
-    console.log('Diagnostic Image:', diagnosticImage);
-    console.log('Xray Image:', xrayImage);
-
-    // ✅ Insert Tests
+    // ✅ Insert Tests for Diagnostic Center
     let testIds = [];
     if (parsedTests.length > 0) {
-      try {
-        const insertedTests = await Test.insertMany(parsedTests);
-        testIds = insertedTests.map(t => t._id);
-      } catch (e) {
-        console.error("Test insertion error:", e);
-        return res.status(400).json({ message: "Failed to insert tests", error: e.message });
-      }
+      const insertedTests = await Test.insertMany(parsedTests);
+      testIds = insertedTests.map(t => t._id);
+      console.log("✅ Tests inserted:", insertedTests);
     }
 
-    // ✅ Insert Packages
+    // ✅ Insert Packages for Diagnostic Center
     let packageIds = [];
     if (parsedPackages.length > 0) {
-      try {
-        const pkgDocs = parsedPackages.map(pkg => ({
-          name: pkg.packageName || pkg.name,
-          price: pkg.price,
-          description: pkg.description,
-          precautions: pkg.instructions || pkg.precautions || '',
-          totalTestsIncluded: pkg.totalTestsIncluded,
-          includedTests: (pkg.includedTests || []).map(test => ({
-            name: test.name,
-            subTestCount: test.subTestCount,
-            subTests: test.subTests || [],
-          })),
-        }));
+      const pkgDocs = parsedPackages.map(pkg => ({
+        name: pkg.packageName || pkg.name,
+        price: pkg.price,
+        description: pkg.description,
+        precautions: pkg.instructions || pkg.precautions || '',
+        totalTestsIncluded: pkg.totalTestsIncluded,
+        includedTests: (pkg.includedTests || []).map(test => ({
+          name: test.name,
+          subTestCount: test.subTestCount,
+          subTests: test.subTests || [],
+        })),
+      }));
 
-        const insertedPackages = await Package.insertMany(pkgDocs);
-        packageIds = insertedPackages.map(p => p._id);
-      } catch (e) {
-        console.error("Package insertion error:", e);
-        return res.status(400).json({ message: "Failed to insert packages", error: e.message });
-      }
+      const insertedPackages = await Package.insertMany(pkgDocs);
+      packageIds = insertedPackages.map(p => p._id);
+      console.log("✅ Packages inserted:", insertedPackages);
     }
 
-    // ✅ Insert Scans
+    // ✅ Insert Scans for Diagnostic Center
     let scanIds = [];
     if (parsedScans.length > 0) {
-      try {
-        // Add x-ray image to the scans if present
-        if (xrayImage) {
-          parsedScans.forEach(scan => {
-            scan.image = xrayImage; // Link the X-ray image to the scan (can be any scan, not just "Chest X-Ray")
-          });
-        }
-
-        console.log('Scans being inserted with X-ray image:', parsedScans);
-
-        const insertedScans = await Xray.insertMany(parsedScans);
-        scanIds = insertedScans.map(s => s._id);
-      } catch (e) {
-        console.error("Scan insertion error:", e);
-        return res.status(400).json({ message: "Failed to insert scans", error: e.message });
+      if (xrayImage) {
+        parsedScans.forEach(scan => {
+          scan.image = xrayImage;
+        });
       }
+
+      const insertedScans = await Xray.insertMany(parsedScans);
+      scanIds = insertedScans.map(s => s._id);
+      console.log("✅ Scans inserted:", insertedScans);
     }
 
-    // 🏥 Create Diagnostic Document
+    // 🏥 Create Diagnostic Center Document
     const diagnostic = new Diagnostic({
       name, email, password, phone, address,
-      image: diagnosticImage,  // Save diagnostic image in Diagnostic model
+      image: diagnosticImage,
       centerType, methodology, pathologyAccredited, gstNumber,
       centerStrength, location, country, state, city, pincode,
       visitType,
@@ -4972,25 +5149,29 @@ export const createDiagnostic = async (req, res) => {
       contactPersons: parsedContacts,
       tests: testIds,
       packages: packageIds,
-      scans: scanIds, // Reference scans here
+      scans: scanIds,
       network,
       description
     });
 
     const savedDiagnostic = await diagnostic.save();
 
-    // 🔗 Add diagnosticId references to other models
+    console.log(`✅ Diagnostic Center saved with ID: ${savedDiagnostic._id}`);
+
+    // Update related models with the diagnostic center ID
     await Promise.all([
       Test.updateMany({ _id: { $in: testIds } }, { diagnosticId: savedDiagnostic._id }),
       Package.updateMany({ _id: { $in: packageIds } }, { diagnosticId: savedDiagnostic._id }),
       Xray.updateMany({ _id: { $in: scanIds } }, { diagnosticId: savedDiagnostic._id }),
     ]);
 
-    // 📦 Populate for response
+    // Populate the diagnostic data
     const populatedDiagnostic = await Diagnostic.findById(savedDiagnostic._id)
       .populate("tests")
       .populate("packages")
       .populate("scans");
+
+    console.log("✅ Diagnostic Center populated with all related data.");
 
     return res.status(201).json({
       message: "Diagnostic center created successfully",
@@ -4998,10 +5179,72 @@ export const createDiagnostic = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ Error creating diagnostic:", error);
+    console.error("❌ Error creating diagnostic center:", error);
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
+// Helper functions
+// ✅ Parse stringified JSON fields (for diagnostics)
+const parseJsonFieldDiagnostic = (field, fieldName) => {
+  if (!field) return [];
+  if (typeof field === "string") {
+    try {
+      return JSON.parse(field);
+    } catch (err) {
+      console.error(`Failed to parse ${fieldName}:`, err.message);
+      return [];
+    }
+  }
+  return field;
+};
+
+// ✅ Default Slot Generator for Diagnostic Centers (9 AM – 11 PM, gap 30 mins, 7 days)
+const generateDefaultSlotsDiagnostic = () => {
+  const slots = [];
+  for (let i = 0; i < 7; i++) {
+    const dateObj = moment().add(i, "days");
+    const day = dateObj.format("dddd");        // e.g., Wednesday
+    const date = dateObj.format("YYYY-MM-DD"); // e.g., 2025-08-20
+
+    let startTime = moment(date + " 09:00", "YYYY-MM-DD HH:mm");
+    const endTime = moment(date + " 23:00", "YYYY-MM-DD HH:mm");
+
+    while (startTime.isBefore(endTime)) {
+      slots.push({
+        day,
+        date,
+        timeSlot: startTime.format("HH:mm"),
+        isBooked: false,
+      });
+      startTime.add(30, "minutes"); // ⏰ 30 mins gap
+    }
+  }
+  return slots;
+};
+
+
+// ✅ Countdown Cron Job: Remind users daily about the upcoming diagnostic slot generation
+const countdownCronJobforDiag = () => {
+  setInterval(() => {
+    const nextSunday = getNextSundayDiagnostic();
+    const daysLeft = nextSunday.diff(moment(), 'days');
+    console.log(`⏳ ${daysLeft} days left until new diagnostic center slots are generated on Sunday!`);
+  }, 86400000);  // Runs every 24 hours (86400000 ms)
+};
+
+// ✅ Function to calculate next Sunday for diagnostic slot generation
+const getNextSundayDiagnostic = () => {
+  const today = moment();
+  const daysUntilSunday = (7 - today.day()) % 7; // Calculate how many days until Sunday
+  const nextSunday = today.add(daysUntilSunday, 'days').startOf('day').add(1, 'day'); // Next Sunday at 12 AM
+  console.log(`✅ Next Sunday for diagnostic slots: ${nextSunday.format('YYYY-MM-DD')}`);
+  return nextSunday;
+};
+
+// Call countdownCronJob to remind every day
+countdownCronJobforDiag();
+
 
 
 
@@ -5093,7 +5336,7 @@ export const deleteDiagnosticSlot = async (req, res) => {
     const { diagnosticId } = req.params;
     const { slotType, day, date, timeSlot } = req.body;
 
-   
+
 
     const diagnostic = await Diagnostic.findById(diagnosticId);
     if (!diagnostic) {
@@ -5855,7 +6098,7 @@ export const createDoctorConsultationBookingByAdmin = async (req, res) => {
 
 
 
-      // 📧 Send Confirmation Email
+    // 📧 Send Confirmation Email
     const mailOptions = {
       from: `"Credent Health" <${process.env.EMAIL}>`,
       to: staff.email,
@@ -6288,7 +6531,7 @@ export const createPackageBookingByAdmin = async (req, res) => {
 
 
 
-      // Send email like Doctor Booking
+    // Send email like Doctor Booking
     const mailOptions = {
       from: `"Credent Health" <${process.env.EMAIL}>`,
       to: staff.email,
@@ -6805,13 +7048,13 @@ export const bulkUploadStaffProfiles = async (req, res) => {
       }
     }
 
-   res.status(200).json({
-  message: "Bulk staff upload completed",
-  totalUploaded: savedStaffs.length,
-  totalFailed: failedEntries.length,
-  failedEntries,
-  savedStaffs  // <-- yeh add karo
-});
+    res.status(200).json({
+      message: "Bulk staff upload completed",
+      totalUploaded: savedStaffs.length,
+      totalFailed: failedEntries.length,
+      failedEntries,
+      savedStaffs  // <-- yeh add karo
+    });
 
 
   } catch (error) {
@@ -6819,6 +7062,324 @@ export const bulkUploadStaffProfiles = async (req, res) => {
     res.status(500).json({
       message: "Server error during bulk staff upload",
       error: error.message,
+    });
+  }
+};
+
+
+export const getAllStaffMedicalUploads = async (req, res) => {
+  try {
+    // Find only staff who have at least one uploaded file
+    const staffList = await Staff.find({
+      userUploadedFiles: { $exists: true, $ne: [] }
+    });
+
+    const response = staffList.map(staff => ({
+      _id: staff._id,
+      name: staff.name,
+      email: staff.email,
+      uploadedFiles: staff.userUploadedFiles
+    }));
+
+    res.status(200).json({
+      message: 'Staff with uploaded medical files fetched successfully',
+      data: response
+    });
+  } catch (error) {
+    console.error('Error fetching staff uploads:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+export const createEmployee = async (req, res) => {
+    const { 
+        name, 
+        email, 
+        password, 
+        mobile, 
+        location, // "location" will map to "address" in DB
+        gender, 
+        designation, 
+        department, 
+        employeeId, 
+        pagesAccess, 
+        grade 
+    } = req.body;
+
+    try {
+        const newEmployee = new Employee({
+            name,
+            email,
+            password,
+            mobile,
+            address: location, // Mapping location from frontend to address in the DB
+            gender,
+            designation,
+            department,
+            employeeId,
+            pagesAccess,
+            grade,
+            role: 'employee' // Default role set to "Employee"
+        });
+
+        // Save the employee to the database
+        await newEmployee.save();
+        res.status(201).json({
+            message: 'Employee created successfully',
+            employee: newEmployee
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Error creating employee', error: error.message });
+    }
+};
+
+// Fetch all employees
+export const getEmployees = async (req, res) => {
+    try {
+        const employees = await Employee.find();
+        res.status(200).json({ employees });
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching employees', error: error.message });
+    }
+};
+
+
+
+export const loginEmployee = async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    // Find employee by email
+    const employee = await Employee.findOne({ email });
+
+    if (!employee) {
+      return res.status(400).json({ message: 'Employee not found' });
+    }
+
+    // Check if the password matches directly (without bcrypt)
+    if (password !== employee.password) {
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    // Return full employee data including pagesAccess
+    return res.status(200).json({
+      message: 'Login successful',
+      employee: employee, // Return the entire employee object
+      role: employee.role
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+// Update Employee
+export const updateEmployee = async (req, res) => {
+    const { 
+        name, 
+        email, 
+        mobile, 
+        location,  // location to address mapping
+        gender, 
+        designation, 
+        department, 
+        employeeId: newEmployeeId, // Rename to avoid conflict
+        pagesAccess, 
+        grade 
+    } = req.body;
+
+    const { id } = req.params; // Get employee ID from params
+
+    try {
+        // Find the employee by ID and update their details
+        const updatedEmployee = await Employee.findByIdAndUpdate(
+            id,  // Use id from params
+            {
+                name,
+                email,
+                mobile,
+                address: location, // Mapping location to address
+                gender,
+                designation,
+                department,
+                employeeId: newEmployeeId, // Use the renamed employeeId (newEmployeeId)
+                pagesAccess,
+                grade
+            },
+            { new: true }  // Return the updated document
+        );
+
+        if (!updatedEmployee) {
+            return res.status(404).json({ message: 'Employee not found' });
+        }
+
+        res.status(200).json({
+            message: 'Employee updated successfully',
+            employee: updatedEmployee
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Error updating employee', error: error.message });
+    }
+};
+
+
+
+// Delete Employee
+export const deleteEmployee = async (req, res) => {
+    const id = req.params.id; // Get employee ID from params
+
+    try {
+        const deletedEmployee = await Employee.findByIdAndDelete(id);
+
+        if (!deletedEmployee) {
+            return res.status(404).json({ message: 'Employee not found' });
+        }
+
+        res.status(200).json({
+            message: 'Employee deleted successfully',
+            employee: deletedEmployee
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Error deleting employee', error: error.message });
+    }
+};
+
+
+
+
+// Controller to upload banner images (single or multiple)
+export const uploadBannerController = (req, res) => {
+  // We will check if the request has multiple files or just a single one.
+  uploadBannerImages(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ message: `Error uploading banner images: ${err.message}` });
+    }
+
+    // If no files are uploaded
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ message: 'No banner images uploaded' });
+    }
+
+    try {
+      // Create an array of image URLs to save in the database
+      const imageUrls = req.files.map(file => 
+        path.join('uploads', 'banner-images', file.filename)  // Constructing the image URL
+      );
+
+      // Save the banner images to the database (Banner collection)
+      const newBanner = new Banner({
+        imageUrls: imageUrls,  // Save all image URLs in an array
+      });
+
+      await newBanner.save();  // Save the banner with image URLs
+
+      return res.status(200).json({
+        message: `${req.files.length > 1 ? 'Multiple' : 'Single'} banner image(s) uploaded and saved successfully`,
+        imageUrls, // Return the array of image URLs
+      });
+
+    } catch (err) {
+      console.error('Error saving banner image(s):', err);
+      return res.status(500).json({
+        message: 'Error saving banner image(s) to database',
+        error: err.message,
+      });
+    }
+  });
+};
+
+
+export const getAllBannerImagesController = async (req, res) => {
+  try {
+    // Fetch all banners from the database
+    const banners = await Banner.find();
+
+    // If no banners exist
+    if (banners.length === 0) {
+      return res.status(404).json({ message: 'No banner images found' });
+    }
+
+    // Extract the image URLs and IDs for all the banners
+    const imageUrlsWithId = banners.map(banner => ({
+      _id: banner._id,  // Include the banner ID in the response
+      imageUrls: banner.imageUrls.map(imageUrl => imageUrl.replace(/\\/g, '/')), // Fix backslashes in image URLs
+    }));
+
+    return res.status(200).json({
+      message: 'Banner images fetched successfully',
+      imageUrls: imageUrlsWithId,  // Return both IDs and array of image URLs
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Error fetching banner images', error: err.message });
+  }
+};
+
+
+
+export const deleteBannerImageController = async (req, res) => {
+  const { bannerId } = req.params; // Get the banner ID from the URL parameter
+
+  try {
+    // Find the banner by its ID
+    const banner = await Banner.findById(bannerId);
+
+    if (!banner) {
+      return res.status(404).json({ message: 'Banner not found' });
+    }
+
+    // Delete the banner from the database
+    await Banner.findByIdAndDelete(bannerId);
+
+    return res.status(200).json({
+      message: 'Banner deleted successfully',
+    });
+  } catch (err) {
+    console.error('Error deleting banner:', err);
+    return res.status(500).json({
+      message: 'Error deleting banner',
+      error: err.message,
+    });
+  }
+};
+
+// Controller to update a banner image
+export const updateBannerImageController = async (req, res) => {
+  const { bannerId } = req.params;
+  const { imageUrl } = req.body; // If you're only updating the image URL
+
+  try {
+    // Find the banner by its ID
+    const banner = await Banner.findById(bannerId);
+
+    if (!banner) {
+      return res.status(404).json({ message: 'Banner image not found' });
+    }
+
+    // Optionally, you can delete the previous image if needed
+    const oldImagePath = path.join(__dirname, '..', banner.imageUrl);
+    fs.unlink(oldImagePath, (err) => {
+      if (err) {
+        console.error('Error deleting old image file:', err);
+      }
+    });
+
+    // Update the banner image URL in the database
+    banner.imageUrl = imageUrl; // Update with new image URL
+
+    await banner.save(); // Save the updated banner
+
+    return res.status(200).json({
+      message: 'Banner image updated successfully',
+      banner,
+    });
+  } catch (err) {
+    console.error('Error updating banner image:', err);
+    return res.status(500).json({
+      message: 'Error updating banner image',
+      error: err.message,
     });
   }
 };

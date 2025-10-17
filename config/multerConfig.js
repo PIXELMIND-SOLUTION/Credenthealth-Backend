@@ -255,6 +255,22 @@ export const uploadDiagnosticReport = multer({
 }).single('report'); // Form field name: 'report'
 
 
+
+
+// 📁 User Medical Upload (report or prescription)
+// Path: uploads/userMedicalFiles
+const userMedicalDir = path.join(__dirname, '..', 'uploads', 'userMedicalFiles');
+makeDir(userMedicalDir); // Ensure the directory exists
+
+export const uploadUserMedicalFile = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, userMedicalDir),
+    filename: (req, file, cb) => cb(null, getFilename(file))
+  }),
+  limits: { fileSize: 20 * 1024 * 1024 } // Max 20 MB
+}).single('file'); // 👈 Form field name: 'file'
+
+
 const diagPrescriptionDir = path.join(__dirname, "..", "uploads", "diagprescription");
 makeDir(diagPrescriptionDir); // Ensure folder exists
 
@@ -393,4 +409,35 @@ export const uploadTestImage = multer({
   }),
   limits: { fileSize: 5 * 1024 * 1024 }, // Max 5MB
 }).single('image'); // form field name = 'testImage'
+
+
+
+// Path where banner images will be stored
+const bannerImagesDir = path.join(__dirname, '..', 'uploads', 'banner-images');
+
+// Create the directory if it doesn't exist
+makeDir(bannerImagesDir);
+
+// Multer middleware for handling both single and multiple banner images
+export const uploadBannerImages = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, bannerImagesDir),
+    filename: (req, file, cb) => cb(null, getFilename(file)),
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }, // Max 5 MB
+}).array('bannerImages', 5); // Form field name = 'bannerImages', max 5 images
+
+
+
+
+const supportFilesDir = path.join(__dirname, '..', 'uploads', 'support-tickets');
+
+// Multer configuration for file upload
+export const uploadHelpFile = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, supportFilesDir),
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }, // Max 5 MB
+}).single('file');
 

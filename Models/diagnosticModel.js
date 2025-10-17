@@ -21,7 +21,7 @@ const diagnosticSchema = new mongoose.Schema({
   city: String,
   pincode: String,
 
-  visitType: { type: String, enum: ["Home Collection", "Visit Center", "Both"] },
+  visitType: { type: String, enum: ["Home Collection", "Visit Center", 'Center Visit', "Both"] },
 
   network: { type: String, enum: ["Single", "Chain", 'Independent', 'Standalone'], default: "Single" },
 

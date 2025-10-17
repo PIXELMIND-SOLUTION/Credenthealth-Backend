@@ -7,7 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import mongoose from 'mongoose';
-import { chatFunction, uploadSupportFile } from "../config/multerConfig.js";
+import { chatFunction, uploadDiagnosticReport, uploadDiagPrescription, uploadSupportFile } from "../config/multerConfig.js";
 import PDFDocument from 'pdfkit';
 import Diagnostic from "../Models/diagnosticModel.js";
 import HealthAssessment from "../Models/HealthAssessment.js";
@@ -27,6 +27,7 @@ import nodemailer from "nodemailer";
 import Counter from "../Models/Counter.js";
 import moment from "moment-timezone";
 import crypto from "crypto"; // ✅ Add this import at the top
+import SupportTicket from "../Models/SupportTicket.js";
 
 
 dotenv.config();
@@ -45,35 +46,39 @@ export const staffLogin = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Find staff by email
+    // Find staff by email from the database
     const staff = await Staff.findOne({ email });
+
     if (!staff) {
       return res.status(400).json({ message: 'Staff not found' });
     }
 
-    // Check if password matches (Note: You should hash the password in a real app)
+    // Check if the password matches (Note: You should hash the password in a real app)
     if (staff.password !== password) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
     // Log the staff _id (staffId)
-    console.log("Staff ID: ", staff._id.toString()); // Log the staffId here
+    console.log("Staff ID: ", staff._id.toString()); // Log the real staff ID here
 
-    // Generate token (Assuming `generateToken` function is defined elsewhere)
+    // Generate token for the authenticated staff
     const token = generateToken(staff._id);
 
-    // Send complete staff object along with token and staffId as string
+    // Send response with the real staff object and token
     res.status(200).json({
       message: 'Login successful',
       token, // Token included here
-      staff: staff // Send complete staff object here
+      staff // Send the complete real staff object here
     });
+
   } catch (error) {
     // Log the error for debugging
     console.error('Error during staff login:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
+
+
 
 
 // controllers/staffController.js
@@ -439,6 +444,7 @@ export const createFamilyMember = async (req, res) => {
       BP,
       sugar,
       relation,
+      description
     } = req.body;
 
     // Find the staff member by their ID
@@ -466,6 +472,7 @@ export const createFamilyMember = async (req, res) => {
       BP,
       sugar,
       relation,
+      description
     };
 
     // Add the new family member to the staff's family_members array
@@ -487,6 +494,7 @@ export const createFamilyMember = async (req, res) => {
         wallet_balance: staff.wallet_balance,
         family_members: staff.family_members,
         doctorAppointments: staff.doctorAppointments,
+        description: staff.description,
         createdAt: staff.createdAt,
         updatedAt: staff.updatedAt,
       },
@@ -565,6 +573,7 @@ export const updateFamilyMember = async (req, res) => {
       BP,
       sugar,
       relation,
+      description
     } = req.body;
 
     // Find the staff member
@@ -592,6 +601,7 @@ export const updateFamilyMember = async (req, res) => {
     familyMember.BP = BP || familyMember.BP;
     familyMember.sugar = sugar || familyMember.sugar;
     familyMember.relation = relation || familyMember.relation;
+    familyMember.description = description || familyMember.description
 
     // Save the updated staff document
     await staff.save();
@@ -1560,6 +1570,17 @@ export const submitAnswer = async (req, res) => {
 
     let totalPoints = 0;
 
+    // Fetch user data to check gender
+    const user = await User.findById(staffId); // Assuming User is a model where staff info is stored
+    const gender = user?.gender; // Assuming 'gender' is stored in the User document
+
+    // Ensure we have a valid gender
+    if (!gender) {
+      return res.status(400).json({ message: "User gender is not available." });
+    }
+
+    console.log("User Gender:", gender);
+
     for (const { sectionId, questionId, selectedAnswer } of answers) {
       console.log(`Processing answer for Section: ${sectionId}, Question: ${questionId}`);
       console.log("Selected Answer:", selectedAnswer);
@@ -1617,6 +1638,16 @@ export const submitAnswer = async (req, res) => {
     await healthAssessment.save();
     console.log("Health assessment saved successfully");
 
+    // Adjust total points based on gender
+    let maxPoints = 100;
+    if (gender === "female") {
+      maxPoints = 120;
+    }
+
+    // Calculate points display based on gender
+    const pointsDisplay = `${totalPoints}/${maxPoints}`;
+    console.log("Points Display:", pointsDisplay);
+
     // Risk category determination
     let riskCategory = "Above 65 – Low Risk";
     if (totalPoints < 50) {
@@ -1629,7 +1660,7 @@ export const submitAnswer = async (req, res) => {
 
     const responsePayload = {
       message: "Answers submitted successfully",
-      totalPoints,
+      totalPoints: pointsDisplay,  // Points display based on gender
       riskCategory,
       data: answers.map(answer => ({
         staffId,
@@ -2355,6 +2386,148 @@ export const createBookingFromStaffCart = async (req, res) => {
   }
 };
 
+
+
+export const rescheduleDiagnosticBooking = async (req, res) => {
+  try {
+    const { staffId, bookingId } = req.params;
+    const { newDate, newTimeSlot } = req.body;
+
+    // Find booking
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({
+        message: "Booking not found",
+        isSuccessfull: false
+      });
+    }
+
+    if (booking.staffId.toString() !== staffId) {
+      return res.status(403).json({
+        message: "You are not authorized to reschedule this booking",
+        isSuccessfull: false
+      });
+    }
+
+    // Parse new date
+    const parsedNewDate = moment(newDate, ["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"]).format("YYYY-MM-DD");
+    if (!parsedNewDate) {
+      return res.status(400).json({
+        message: "Invalid new date format",
+        isSuccessfull: false
+      });
+    }
+
+    const diagnostic = await Diagnostic.findById(booking.diagnosticId);
+    if (!diagnostic) {
+      return res.status(404).json({
+        message: "Diagnostic center not found",
+        isSuccessfull: false
+      });
+    }
+
+    let slotUpdated = false;
+
+    // Free old slot
+    const freeOldSlot = (slots) =>
+      slots.map(slot => {
+        if (slot.date === booking.date && slot.timeSlot === booking.timeSlot) {
+          slot.isBooked = false;
+        }
+        return slot;
+      });
+
+    if (booking.serviceType === "Home Collection") {
+      diagnostic.homeCollectionSlots = freeOldSlot(diagnostic.homeCollectionSlots);
+    } else if (booking.serviceType === "Center Visit") {
+      diagnostic.centerVisitSlots = freeOldSlot(diagnostic.centerVisitSlots);
+    }
+
+    // Book new slot
+    const bookNewSlot = (slots) =>
+      slots.map(slot => {
+        if (slot.date === parsedNewDate && slot.timeSlot === newTimeSlot && !slot.isBooked) {
+          slot.isBooked = true;
+          slotUpdated = true;
+        }
+        return slot;
+      });
+
+    if (booking.serviceType === "Home Collection") {
+      diagnostic.homeCollectionSlots = bookNewSlot(diagnostic.homeCollectionSlots);
+    } else if (booking.serviceType === "Center Visit") {
+      diagnostic.centerVisitSlots = bookNewSlot(diagnostic.centerVisitSlots);
+    }
+
+    if (!slotUpdated) {
+      return res.status(400).json({
+        message: "Requested new slot is not available",
+        isSuccessfull: false
+      });
+    }
+
+    // Update booking
+    booking.date = parsedNewDate;
+    booking.timeSlot = newTimeSlot;
+    booking.status = "Rescheduled"; // ✅ Update status when rescheduled
+
+    await booking.save();
+    await diagnostic.save();
+
+    // Notify staff
+    const staff = await Staff.findById(staffId);
+    if (staff) {
+      staff.notifications.push({
+        title: "Diagnostics Booking Rescheduled",
+        message: `Your diagnostic booking has been rescheduled to ${parsedNewDate} at ${newTimeSlot}.`,
+        timestamp: new Date(),
+        bookingId: booking._id
+      });
+      await staff.save();
+
+      // Send email
+      const mailOptions = {
+        from: `"Credent Health" <${process.env.EMAIL}>`,
+        to: staff.email,
+        subject: "Your Diagnostics Booking has been Rescheduled",
+        html: `
+          <h2>Booking Rescheduled</h2>
+          <p>Hello ${staff.name},</p>
+          <p>Your diagnostic booking has been rescheduled.</p>
+          <p><strong>Booking ID:</strong> ${booking.diagnosticBookingId}</p>
+          <p><strong>New Date:</strong> ${parsedNewDate}</p>
+          <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
+          <p><strong>Service Type:</strong> ${booking.serviceType}</p>
+          <br>
+          <p>Thank you,<br>Team CredentHealth</p>
+        `
+      };
+
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log("✅ Reschedule email sent to:", staff.email);
+      } catch (err) {
+        console.error("❌ Email sending failed:", err);
+      }
+    }
+
+    return res.status(200).json({
+      message: "Booking rescheduled successfully",
+      isSuccessfull: true,
+      booking,
+    });
+
+  } catch (error) {
+    console.error("❌ Error in rescheduling diagnostic booking:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message,
+      isSuccessfull: false
+    });
+  }
+};
+
+
 export const myBookings = async (req, res) => {
   try {
     const staffId = req.params.staffId;
@@ -2363,7 +2536,7 @@ export const myBookings = async (req, res) => {
     if (!staff) return res.status(404).json({ message: 'Staff not found' });
 
     const bookings = await Booking.find({ staffId })
-      .populate("diagnosticId", "name distance image address homeCollection centerVisit description doctorConsultationBookingId diagnosticBookingId")
+      .populate("diagnosticId", "name distance image address homeCollection centerVisit description doctorId doctorConsultationBookingId diagnosticBookingId")
       .populate("cartId")
       .populate("packageId", "name price description totalTestsIncluded")
       .populate("doctorId", "name email image specialization qualification address")
@@ -2474,6 +2647,7 @@ export const myBookings = async (req, res) => {
           discount: booking.discount,
           payableAmount: booking.payableAmount,
           doctorConsultationBookingId: booking.doctorConsultationBookingId || null,
+          doctorId: booking.doctorId || null,
           diagnosticBookingId: booking.diagnosticBookingId || null,
 
           diagnostic: booking.diagnosticId
@@ -2733,26 +2907,35 @@ export const createPackageBooking = async (req, res) => {
       date,
       timeSlot,
       transactionId,
-      addressId // Added addressId field
+      addressId
     } = req.body;
 
-    // 🛠 Convert "null" string to actual null
+    // Convert "null" string to actual null
     if (timeSlot === "null") timeSlot = null;
     if (transactionId === "null") transactionId = null;
 
-    // 🛠 Validate service type
+    // Validate service type
     if (!["Home Collection", "Center Visit"].includes(serviceType)) {
-      return res.status(400).json({ message: "Invalid service type", isSuccessfull: false });
+      return res.status(400).json({ 
+        message: "Invalid service type", 
+        isSuccessfull: false 
+      });
     }
 
-    // 🛠 Fetch staff and package
+    // Fetch staff and package
     const staff = await Staff.findById(staffId);
-    if (!staff) return res.status(404).json({ message: "Staff not found", isSuccessfull: false });
+    if (!staff) return res.status(404).json({ 
+      message: "Staff not found", 
+      isSuccessfull: false 
+    });
 
     const packageData = await Package.findById(packageId);
-    if (!packageData) return res.status(404).json({ message: "Package not found", isSuccessfull: false });
+    if (!packageData) return res.status(404).json({ 
+      message: "Package not found", 
+      isSuccessfull: false 
+    });
 
-    // 💰 Payment calculation
+    // Payment calculation
     const payableAmount = packageData.offerPrice || packageData.price;
     const availablePackageBalance = staff.forPackages || 0;
 
@@ -2780,18 +2963,41 @@ export const createPackageBooking = async (req, res) => {
         });
       }
 
-      let paymentInfo = await razorpay.payments.fetch(transactionId);
-      if (!paymentInfo) return res.status(404).json({ message: "Payment not found", isSuccessfull: false });
+      // Razorpay payment handling - consistent with cart booking
+      let paymentInfo;
+      try {
+        paymentInfo = await razorpay.payments.fetch(transactionId);
+      } catch (err) {
+        return res.status(400).json({
+          message: "Invalid transaction ID",
+          isSuccessfull: false
+        });
+      }
+
+      // Validate payment amount matches booking amount
+      if (Math.round(paymentInfo.amount / 100) !== payableAmount) {
+        return res.status(400).json({
+          message: "Payment amount doesn't match booking amount",
+          isSuccessfull: false,
+          paymentAmount: paymentInfo.amount / 100,
+          bookingAmount: payableAmount
+        });
+      }
 
       if (paymentInfo.status === "authorized") {
         try {
-          await razorpay.payments.capture(transactionId, onlinePaymentUsed * 100, "INR");
+          await razorpay.payments.capture(
+            transactionId,
+            paymentInfo.amount,
+            paymentInfo.currency || "INR"
+          );
           paymentInfo = await razorpay.payments.fetch(transactionId);
         } catch (err) {
+          console.error("Payment capture error:", err);
           return res.status(500).json({
             message: "Payment capture failed",
             isSuccessfull: false,
-            error: err.message,
+            error: err.message
           });
         }
       }
@@ -2799,7 +3005,7 @@ export const createPackageBooking = async (req, res) => {
       if (paymentInfo.status !== "captured") {
         return res.status(400).json({
           message: `Payment not captured. Status: ${paymentInfo.status}`,
-          isSuccessfull: false,
+          isSuccessfull: false
         });
       }
 
@@ -2807,7 +3013,7 @@ export const createPackageBooking = async (req, res) => {
       paymentDetails = paymentInfo;
     }
 
-    // 🛠 Wallet log
+    // Wallet log
     if (walletUsed > 0) {
       staff.wallet_logs.push({
         type: "debit",
@@ -2821,31 +3027,38 @@ export const createPackageBooking = async (req, res) => {
     }
     await staff.save();
 
-    // 📅 Flexible Date Handling
-    let formattedDate;
-    if (date.includes("/")) {
-      const parts = date.split("/");
-      if (parts[0].length === 4) {
-        formattedDate = moment(`${parts[0]}-${parts[1]}-${parts[2]}`).format("YYYY-MM-DD");
-      } else {
-        formattedDate = moment(`${parts[2]}-${parts[1]}-${parts[0]}`).format("YYYY-MM-DD");
-      }
-    } else {
-      formattedDate = moment(date).format("YYYY-MM-DD");
+    // Date formatting
+    const bookingDate = moment(date, [
+      "YYYY-MM-DD",
+      "DD/MM/YYYY",
+      "MM/DD/YYYY"
+    ]).isValid()
+      ? moment(date, [
+          "YYYY-MM-DD",
+          "DD/MM/YYYY",
+          "MM/DD/YYYY"
+        ]).format("YYYY-MM-DD")
+      : null;
+
+    if (!bookingDate) {
+      return res.status(400).json({
+        message: "Invalid date format",
+        isSuccessfull: false
+      });
     }
 
-    // 🔢 Unique Booking IDs
+    // Generate unique booking IDs
     const packageBookingId = await generatePackageBookingId();
     const diagnosticBookingId = await generateDiagnosticBookingId();
 
-    // 💾 Save booking
+    // Save booking
     const booking = new Booking({
       staffId,
       familyMemberId,
       diagnosticId,
       packageId,
       serviceType,
-      date: formattedDate,
+      date: bookingDate,
       timeSlot,
       totalPrice: payableAmount,
       discount: 0,
@@ -2857,46 +3070,45 @@ export const createPackageBooking = async (req, res) => {
       isSuccessfull: true,
       packageBookingId,
       diagnosticBookingId,
-       addressId: serviceType === "Home Collection" ? addressId : null // Add addressId condition
+      addressId: serviceType === "Home Collection" ? addressId : null
     });
 
     const savedBooking = await booking.save();
 
-    // 🕒 Update slot booking
+    // Update diagnostic slots
     const diagnostic = await Diagnostic.findById(diagnosticId);
     if (diagnostic) {
-      let updated = false;
+      const updateSlots = (slots) =>
+        slots.map(slot => {
+          if (
+            slot.date === bookingDate &&
+            slot.timeSlot === timeSlot &&
+            !slot.isBooked
+          ) {
+            slot.isBooked = true;
+          }
+          return slot;
+        });
+
       if (serviceType === "Home Collection") {
-        diagnostic.homeCollectionSlots = diagnostic.homeCollectionSlots.map(slot => {
-          if (slot.date === formattedDate && slot.timeSlot === timeSlot && !slot.isBooked) {
-            slot.isBooked = true;
-            updated = true;
-          }
-          return slot;
-        });
+        diagnostic.homeCollectionSlots = updateSlots(diagnostic.homeCollectionSlots);
       } else {
-        diagnostic.centerVisitSlots = diagnostic.centerVisitSlots.map(slot => {
-          if (slot.date === formattedDate && slot.timeSlot === timeSlot && !slot.isBooked) {
-            slot.isBooked = true;
-            updated = true;
-          }
-          return slot;
-        });
+        diagnostic.centerVisitSlots = updateSlots(diagnostic.centerVisitSlots);
       }
-      if (updated) await diagnostic.save();
+      await diagnostic.save();
     }
 
-    // 🔔 Notify staff
+    // Notify staff
     staff.notifications.push({
       title: "Package Booking Confirmed",
-      message: `Your package booking for ${formattedDate} at ${timeSlot || "N/A"} has been confirmed.`,
+      message: `Your package booking for ${bookingDate} at ${timeSlot || "N/A"} has been confirmed.`,
       timestamp: new Date(),
       bookingId: savedBooking._id,
     });
     await staff.save();
 
-    // 📧 Send Email
-    transporter.sendMail({
+    // Send email
+    const mailOptions = {
       from: `"Credent Health" <${process.env.EMAIL}>`,
       to: staff.email,
       subject: "Your Package Booking is Confirmed",
@@ -2905,16 +3117,21 @@ export const createPackageBooking = async (req, res) => {
         <p>Hello ${staff.name},</p>
         <p>Your booking for <strong>${packageData.name}</strong> is confirmed.</p>
         <p><strong>Booking ID:</strong> ${packageBookingId}</p>
-        <p><strong>Date:</strong> ${formattedDate}</p>
+        <p><strong>Date:</strong> ${bookingDate}</p>
         <p><strong>Time:</strong> ${timeSlot || "N/A"}</p>
         <p><strong>Service Type:</strong> ${serviceType}</p>
         <p><strong>Amount Paid:</strong> ₹${payableAmount}</p>
+        <br>
+        <p>Thank you,<br>Team CredentHealth</p>
       `
-    }, (error) => {
-      if (error) console.error("Email send failed:", error);
-    });
+    };
 
-    // ✅ Success Response
+    try {
+      await transporter.sendMail(mailOptions);
+    } catch (err) {
+      console.error("Email sending failed:", err);
+    }
+
     return res.status(201).json({
       message: "Package booking created successfully.",
       isSuccessfull: true,
@@ -2928,9 +3145,157 @@ export const createPackageBooking = async (req, res) => {
 
   } catch (err) {
     console.error("Error creating package booking:", err);
-    res.status(500).json({ message: "Server error", isSuccessfull: false, error: err.message });
+    res.status(500).json({ 
+      message: "Server error", 
+      isSuccessfull: false, 
+      error: err.message 
+    });
   }
 };
+
+
+
+export const reschedulePackageBooking = async (req, res) => {
+  try {
+    const { staffId, bookingId } = req.params;
+    const { newDate, newTimeSlot } = req.body;
+
+    // Find the booking
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({
+        message: "Booking not found",
+        isSuccessfull: false
+      });
+    }
+
+    if (booking.staffId.toString() !== staffId) {
+      return res.status(403).json({
+        message: "You are not authorized to reschedule this booking",
+        isSuccessfull: false
+      });
+    }
+
+    // Parse new date
+    const parsedNewDate = moment(newDate, ["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"]).format("YYYY-MM-DD");
+    if (!parsedNewDate) {
+      return res.status(400).json({
+        message: "Invalid new date format",
+        isSuccessfull: false
+      });
+    }
+
+    // Fetch the diagnostic
+    const diagnostic = await Diagnostic.findById(booking.diagnosticId);
+    if (!diagnostic) {
+      return res.status(404).json({
+        message: "Diagnostic center not found",
+        isSuccessfull: false
+      });
+    }
+
+    let slotUpdated = false;
+
+    // Free old slot
+    const freeOldSlot = (slots) =>
+      slots.map(slot => {
+        if (slot.date === booking.date && slot.timeSlot === booking.timeSlot) {
+          slot.isBooked = false;
+        }
+        return slot;
+      });
+
+    if (booking.serviceType === "Home Collection") {
+      diagnostic.homeCollectionSlots = freeOldSlot(diagnostic.homeCollectionSlots);
+    } else if (booking.serviceType === "Center Visit") {
+      diagnostic.centerVisitSlots = freeOldSlot(diagnostic.centerVisitSlots);
+    }
+
+    // Book new slot
+    const bookNewSlot = (slots) =>
+      slots.map(slot => {
+        if (slot.date === parsedNewDate && slot.timeSlot === newTimeSlot && !slot.isBooked) {
+          slot.isBooked = true;
+          slotUpdated = true;
+        }
+        return slot;
+      });
+
+    if (booking.serviceType === "Home Collection") {
+      diagnostic.homeCollectionSlots = bookNewSlot(diagnostic.homeCollectionSlots);
+    } else if (booking.serviceType === "Center Visit") {
+      diagnostic.centerVisitSlots = bookNewSlot(diagnostic.centerVisitSlots);
+    }
+
+    if (!slotUpdated) {
+      return res.status(400).json({
+        message: "Requested new slot is not available",
+        isSuccessfull: false
+      });
+    }
+
+    // Update booking
+    booking.date = parsedNewDate;
+    booking.timeSlot = newTimeSlot;
+    booking.status = "Rescheduled"; // ✅ Update status when rescheduled
+
+    await booking.save();
+    await diagnostic.save();
+
+    // Notify staff
+    const staff = await Staff.findById(staffId);
+    if (staff) {
+      staff.notifications.push({
+        title: "Package Booking Rescheduled",
+        message: `Your package booking has been rescheduled to ${parsedNewDate} at ${newTimeSlot}.`,
+        timestamp: new Date(),
+        bookingId: booking._id
+      });
+      await staff.save();
+
+      // Send email
+      const mailOptions = {
+        from: `"Credent Health" <${process.env.EMAIL}>`,
+        to: staff.email,
+        subject: "Your Package Booking has been Rescheduled",
+        html: `
+          <h2>Package Booking Rescheduled</h2>
+          <p>Hello ${staff.name},</p>
+          <p>Your package booking has been successfully rescheduled.</p>
+          <p><strong>Booking ID:</strong> ${booking.packageBookingId}</p>
+          <p><strong>New Date:</strong> ${parsedNewDate}</p>
+          <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
+          <p><strong>Service Type:</strong> ${booking.serviceType}</p>
+          <br>
+          <p>Thank you,<br>Team CredentHealth</p>
+        `
+      };
+
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log("✅ Reschedule email sent to:", staff.email);
+      } catch (err) {
+        console.error("❌ Email sending failed:", err);
+      }
+    }
+
+    return res.status(200).json({
+      message: "Package booking rescheduled successfully",
+      isSuccessfull: true,
+      booking
+    });
+
+  } catch (error) {
+    console.error("❌ Error in rescheduling package booking:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message,
+      isSuccessfull: false
+    });
+  }
+};
+
+
 
 export const getSingleBooking = async (req, res) => {
   try {
@@ -2942,54 +3307,146 @@ export const getSingleBooking = async (req, res) => {
 
     // Step 2: Find the booking
     const booking = await Booking.findOne({ staffId, _id: bookingId })
-      .populate("diagnosticId", "name distance image")
+      .populate("diagnosticId", "name distance image address homeCollection centerVisit description doctorConsultationBookingId diagnosticBookingId")
       .populate("cartId")
       .populate("packageId", "name price description totalTestsIncluded")
-      .populate("doctorId", "name specialization qualification address")
+      .populate("doctorId", "name email image specialization qualification address")
       .lean();
 
     if (!booking) {
       return res.status(404).json({ message: "Booking not found" });
     }
 
-    // Step 3: Resolve family member from embedded array
+    // ✅ Date formatting same as myBookings
+    let formattedDate = null;
+    let bookingDateTime = null;
+
+    if (booking.date) {
+      const dateObj = new Date(booking.date);
+      if (!isNaN(dateObj)) {
+        formattedDate = dateObj.toISOString().split('T')[0];
+        bookingDateTime = new Date(dateObj);
+      }
+    }
+
+    // ✅ Time parsing same as myBookings
+    if (bookingDateTime && booking.timeSlot) {
+      try {
+        const [time, modifier] = booking.timeSlot.split(" ");
+        let [hours, minutes] = time.split(":").map(Number);
+
+        if (modifier === "PM" && hours !== 12) hours += 12;
+        if (modifier === "AM" && hours === 12) hours = 0;
+
+        bookingDateTime.setHours(hours);
+        bookingDateTime.setMinutes(minutes);
+        bookingDateTime.setSeconds(0);
+      } catch (err) {
+        console.warn("⚠️ Invalid timeSlot format:", booking.timeSlot);
+      }
+    }
+
+    // ✅ Family member
     const familyMember = staff.family_members.find(member =>
       member._id.toString() === booking.familyMemberId?.toString()
     );
     booking.familyMember = familyMember || null;
 
-    // Step 4: Manually populate cart item details
-    if (booking.cartId?.items?.length) {
-      booking.cartId.items = await Promise.all(
-        booking.cartId.items.map(async (item) => {
-          let itemDetails = null;
-          if (item.type === "xray") {
-            itemDetails = await Xray.findById(item.itemId).lean();
-          } else if (item.type === "test") {
-            itemDetails = await Test.findById(item.itemId).lean();
+    // ✅ Populate cart items same as myBookings
+    booking.cartItems = booking.cartId?.items?.length
+      ? await Promise.all(
+          booking.cartId.items.map(async (item) => {
+            let itemDetails = null;
+            if (item.type === "xray") {
+              itemDetails = await Xray.findById(item.itemId).lean();
+            } else if (item.type === "test") {
+              itemDetails = await Test.findById(item.itemId).lean();
+            }
+            return { ...item, itemDetails: itemDetails || null };
+          })
+        )
+      : [];
+
+    // ✅ Final structure for single booking
+    const finalBooking = {
+      bookingId: booking._id,
+      serviceType: booking.serviceType || "",
+      type: booking.type || "",
+      meetingLink: booking.meetingLink || null,
+      bookedSlot: booking.bookedSlot
+        ? {
+            ...booking.bookedSlot,
+            date: booking.bookedSlot.date
+              ? new Date(booking.bookedSlot.date).toISOString().split('T')[0]
+              : null,
           }
-          return { ...item, itemDetails };
-        })
-      );
+        : null,
+      status: booking.status,
+      date: formattedDate || null,
+      timeSlot: booking.timeSlot,
+      totalPrice: booking.totalPrice,
+      discount: booking.discount,
+      payableAmount: booking.payableAmount,
+      doctorConsultationBookingId: booking.doctorConsultationBookingId || null,
+      diagnosticBookingId: booking.diagnosticBookingId || null,
+
+    diagnostic: booking.diagnosticId
+  ? {
+      diagnosticId: booking.diagnosticId._id,  // <-- Add diagnosticId here
+      name: booking.diagnosticId.name,
+      description: booking.diagnosticId.description,
+      image: booking.diagnosticId.image,
+      distance: booking.diagnosticId.distance,
+      homeCollection: booking.diagnosticId.homeCollection,
+      centerVisit: booking.diagnosticId.centerVisit,
+      address: booking.diagnosticId.address,
     }
+  : null,
 
-    // ✅ Include doctorReports and doctorPrescriptions for frontend
-    booking.doctor_reports = booking.doctorReports || [];
-    booking.doctor_prescriptions = booking.doctorPrescriptions || [];
+      package: booking.packageId || null,
 
-    // ✅ Include diagPrescription for frontend
-    booking.diagPrescription = booking.diagPrescription || null;
+      patient: familyMember
+        ? {
+            name: familyMember.fullName,
+            age: familyMember.age,
+            gender: familyMember.gender,
+            relation: familyMember.relation,
+          }
+        : null,
 
-    // Optional: Keep legacy field for compatibility
-    booking.reportFile = booking.report_file || null;
+      doctor: booking.doctorId
+        ? {
+          doctorId: booking.doctorId._id, // Include only the doctorId (ID field)
+            name: booking.doctorId.name,
+            email: booking.doctorId.email,
+            image: booking.doctorId.image,
+            specialization: booking.doctorId.specialization,
+            qualification: booking.doctorId.qualification,
+            address: booking.doctorId.address,
+          }
+        : null,
 
-    res.status(200).json({ success: true, booking });
+      staff: {
+        name: staff.name,
+        email: staff.email,
+        contact_number: staff.contact_number,
+      },
+
+      cartItems: booking.cartItems,
+      reportFile: booking.report_file || null,
+      diagPrescription: booking.diagPrescription || null,
+      doctorReports: booking.doctorReports || [],
+      doctorPrescriptions: booking.doctorPrescriptions || [],
+    };
+
+    res.status(200).json({ success: true, booking: finalBooking });
 
   } catch (err) {
     console.error("❌ Error fetching booking:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
+
 
 export const cancelBooking = async (req, res) => {
   try {
@@ -3088,27 +3545,29 @@ export const createDoctorConsultationBooking = async (req, res) => {
     const {
       doctorId,
       day,
-      date, // Expecting "YYYY-MM-DD" from frontend
+      date, // Could be YYYY-MM-DD or YYYY/MM/DD
       timeSlot,
       familyMemberId,
       type,
-      transactionId
+      transactionId,
     } = req.body;
 
-    if (!["Online", "Offline"].includes(type)) {
-      return res.status(400).json({
-        message: "Consultation type must be 'Online' or 'Offline'",
-        isSuccessfull: false,
-      });
-    }
+    // if (!["Online", "Offline"].includes(type)) {
+    //   return res.status(400).json({
+    //     message: "Consultation type must be 'Online' or 'Offline'",
+    //     isSuccessfull: false,
+    //   });
+    // }
 
-    const parsedDate = new Date(date);
-    if (isNaN(parsedDate.getTime())) {
+    // ✅ Flexible date parsing
+    const parsedDate = moment(date, ["YYYY-MM-DD", "YYYY/MM/DD"], true);
+    if (!parsedDate.isValid()) {
       return res.status(400).json({
-        message: "Invalid date format. Use YYYY-MM-DD.",
+        message: "Invalid date format. Use YYYY-MM-DD or YYYY/MM/DD.",
         isSuccessfull: false,
       });
     }
+    const formattedDate = parsedDate.format("YYYY-MM-DD"); // Normalize date
 
     const staff = await Staff.findById(staffId);
     if (!staff) {
@@ -3141,27 +3600,27 @@ export const createDoctorConsultationBooking = async (req, res) => {
     let paymentStatus = null;
     let paymentDetails = null;
 
-    // ✅ Use wallet first
+    // ✅ Wallet logic
     if (availableDoctorBalance >= consultationFee) {
       walletUsed = consultationFee;
       staff.wallet_balance -= walletUsed;
       staff.forDoctors -= walletUsed;
     } else {
       walletUsed = availableDoctorBalance;
-      onlinePaymentUsed = consultationFee - availableDoctorBalance;
+      onlinePaymentUsed = consultationFee - walletUsed;
       staff.wallet_balance -= walletUsed;
       staff.forDoctors = 0;
 
       if (!transactionId) {
         return res.status(402).json({
-          message: "Insufficient wallet balance. Please provide transactionId for online payment.",
+          message: "Insufficient wallet balance. Please provide transactionId.",
           isSuccessfull: false,
           walletAvailable: availableDoctorBalance,
           requiredOnline: onlinePaymentUsed,
         });
       }
 
-      // ✅ Razorpay payment capture
+      // ✅ Razorpay capture
       let paymentInfo = await razorpay.payments.fetch(transactionId);
       if (!paymentInfo) {
         return res.status(404).json({
@@ -3209,19 +3668,16 @@ export const createDoctorConsultationBooking = async (req, res) => {
 
     await staff.save();
 
-    // ✅ Generate Google Meet link (dummy for now)
-    let meetingLink = null;
-    if (type === "Online") {
-      meetingLink = "";  // <-- Set empty string instead of generating link
-    }
+    // ✅ Meeting link
+    const meetingLink = type === "Online" ? "" : null;
 
-    // Persistent Booking ID
+    // ✅ Generate Booking ID
     let counter = await Counter.findOneAndUpdate(
       { name: "doctorConsultationBooking" },
       { $inc: { value: 1 } },
       { new: true, upsert: true }
     );
-    const formattedBookingId = `DoctorBookingId_${String(counter.value).padStart(4, '0')}`;
+    const formattedBookingId = `DoctorBookingId_${String(counter.value).padStart(4, "0")}`;
 
     // ✅ Create booking
     const booking = new Booking({
@@ -3229,7 +3685,7 @@ export const createDoctorConsultationBooking = async (req, res) => {
       doctorId,
       familyMemberId,
       day,
-      date: parsedDate,
+      date: parsedDate.toDate(), // Stored as Date
       timeSlot,
       totalPrice: consultationFee,
       discount: 0,
@@ -3240,56 +3696,57 @@ export const createDoctorConsultationBooking = async (req, res) => {
       isBooked: true,
       bookedSlot: {
         day,
-        date: parsedDate,
-        timeSlot
+        date: formattedDate, // Store normalized string
+        timeSlot,
       },
       doctorConsultationBookingId: formattedBookingId,
       transactionId: transactionId || null,
       paymentStatus,
       paymentDetails,
-      isSuccessfull: true
+      isSuccessfull: true,
     });
 
     const savedBooking = await booking.save();
 
-    // ✅ Add notification to staff
+    // ✅ Notification
     staff.notifications.push({
       title: "Doctor Consultation Booked",
-      message: `Your consultation with Dr. ${doctor.name} is confirmed for ${date} at ${timeSlot}.`,
+      message: `Your consultation with Dr. ${doctor.name} is confirmed for ${formattedDate} at ${timeSlot}.`,
       timestamp: new Date(),
       bookingId: savedBooking._id,
     });
 
     await staff.save();
 
-    // ✅ Mark the booked slot as isBooked: true
+    // ✅ Update doctor slots
     let updated = false;
+    const targetSlot = { day, date: formattedDate, timeSlot };
+
+    const updateSlots = (slots) =>
+      slots.map((slot) => {
+        if (
+          slot.day === targetSlot.day &&
+          slot.date === targetSlot.date &&
+          slot.timeSlot === targetSlot.timeSlot &&
+          !slot.isBooked
+        ) {
+          slot.isBooked = true;
+          updated = true;
+        }
+        return slot;
+      });
 
     if (type === "Online") {
-      doctor.onlineSlots = doctor.onlineSlots.map(slot => {
-        if (slot.day === day && slot.date === date && slot.timeSlot === timeSlot && !slot.isBooked) {
-          slot.isBooked = true;
-          updated = true;
-        }
-        return slot;
-      });
+      doctor.onlineSlots = updateSlots(doctor.onlineSlots);
     } else if (type === "Offline") {
-      doctor.offlineSlots = doctor.offlineSlots.map(slot => {
-        if (slot.day === day && slot.date === date && slot.timeSlot === timeSlot && !slot.isBooked) {
-          slot.isBooked = true;
-          updated = true;
-        }
-        return slot;
-      });
+      doctor.offlineSlots = updateSlots(doctor.offlineSlots);
     }
 
     if (updated) {
       await doctor.save();
     }
 
-
-
-    // ✅ Send email to staff
+    // ✅ Email
     const mailOptions = {
       from: `"Credent Health" <${process.env.EMAIL}>`,
       to: staff.email,
@@ -3299,25 +3756,24 @@ export const createDoctorConsultationBooking = async (req, res) => {
         <p>Hello ${staff.name},</p>
         <p>Your consultation with <strong>Dr. ${doctor.name}</strong> has been successfully booked.</p>
         <p><strong>Booking ID:</strong> ${formattedBookingId}</p>
-        <p><strong>Date:</strong> ${date}</p>
+        <p><strong>Date:</strong> ${formattedDate}</p>
         <p><strong>Time Slot:</strong> ${timeSlot}</p>
         <p><strong>Consultation Type:</strong> ${type}</p>
         <p><strong>Meeting Link:</strong> ${meetingLink || "N/A"}</p>
         <p><strong>Paid Amount:</strong> ₹${consultationFee}</p>
         <br>
         <p>Thank you,<br>Team CredentHealth</p>
-      `
+      `,
     };
 
-   try {
-  await transporter.sendMail(mailOptions);
-  console.log("✅ Email sent to:", staff.email);
-} catch (err) {
-  console.error("❌ Email sending failed:", err);
-}
+    try {
+      await transporter.sendMail(mailOptions);
+      console.log("✅ Email sent to:", staff.email);
+    } catch (err) {
+      console.error("❌ Email sending failed:", err);
+    }
 
-
-    // ✅ Send response with clean date format
+    // ✅ Send final response
     res.status(201).json({
       success: true,
       message: "Doctor consultation booked successfully.",
@@ -3329,11 +3785,11 @@ export const createDoctorConsultationBooking = async (req, res) => {
       walletBalance: staff.wallet_balance,
       booking: {
         ...savedBooking._doc,
-        date: parsedDate.toISOString().split("T")[0], // Format as YYYY-MM-DD
+        date: formattedDate,
         bookedSlot: {
           ...savedBooking.bookedSlot,
-          date: parsedDate.toISOString().split("T")[0]
-        }
+          date: formattedDate,
+        },
       },
       meetingLink,
     });
@@ -3348,6 +3804,165 @@ export const createDoctorConsultationBooking = async (req, res) => {
   }
 };
 
+
+export const rescheduleDoctorConsultation = async (req, res) => {
+  try {
+    const { staffId, bookingId } = req.params;
+    const { newDay, newDate, newTimeSlot } = req.body;
+
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({
+        message: "Booking not found",
+        isSuccessfull: false
+      });
+    }
+
+    if (booking.staffId.toString() !== staffId) {
+      return res.status(403).json({
+        message: "You are not authorized to reschedule this booking",
+        isSuccessfull: false
+      });
+    }
+
+    const doctor = await Doctor.findById(booking.doctorId);
+    if (!doctor) {
+      return res.status(404).json({
+        message: "Doctor not found",
+        isSuccessfull: false
+      });
+    }
+
+    // Parse new date
+    const parsedNewDate = new Date(newDate);
+    if (isNaN(parsedNewDate.getTime())) {
+      return res.status(400).json({
+        message: "Invalid new date format. Use YYYY-MM-DD.",
+        isSuccessfull: false,
+      });
+    }
+
+    let slotUpdated = false;
+
+    // Helper to normalize date
+    const normalizeDate = (date) => new Date(date).toISOString().split("T")[0];
+
+    const oldDateStr = normalizeDate(booking.date);
+    const newDateStr = normalizeDate(parsedNewDate);
+
+    // Free old slot
+    if (booking.type === "Online") {
+      doctor.onlineSlots = doctor.onlineSlots.map(slot => {
+        const slotDateStr = normalizeDate(slot.date);
+        if (slot.day === booking.day && slotDateStr === oldDateStr && slot.timeSlot === booking.timeSlot) {
+          slot.isBooked = false;
+        }
+        return slot;
+      });
+    } else {
+      doctor.offlineSlots = doctor.offlineSlots.map(slot => {
+        const slotDateStr = normalizeDate(slot.date);
+        if (slot.day === booking.day && slotDateStr === oldDateStr && slot.timeSlot === booking.timeSlot) {
+          slot.isBooked = false;
+        }
+        return slot;
+      });
+    }
+
+    // Book new slot
+    if (booking.type === "Online") {
+      doctor.onlineSlots = doctor.onlineSlots.map(slot => {
+        const slotDateStr = normalizeDate(slot.date);
+        if (slot.day === newDay && slotDateStr === newDateStr && slot.timeSlot === newTimeSlot && !slot.isBooked) {
+          slot.isBooked = true;
+          slotUpdated = true;
+        }
+        return slot;
+      });
+    } else {
+      doctor.offlineSlots = doctor.offlineSlots.map(slot => {
+        const slotDateStr = normalizeDate(slot.date);
+        if (slot.day === newDay && slotDateStr === newDateStr && slot.timeSlot === newTimeSlot && !slot.isBooked) {
+          slot.isBooked = true;
+          slotUpdated = true;
+        }
+        return slot;
+      });
+    }
+
+    if (!slotUpdated) {
+      return res.status(400).json({
+        message: "Requested new slot is not available",
+        isSuccessfull: false
+      });
+    }
+
+    // Update booking
+    booking.day = newDay;
+    booking.date = parsedNewDate;
+    booking.timeSlot = newTimeSlot;
+    booking.status = "Rescheduled"; // ✅ Update status
+    booking.bookedSlot = {
+      day: newDay,
+      date: parsedNewDate,
+      timeSlot: newTimeSlot
+    };
+
+    await booking.save();
+    await doctor.save();
+
+    // Notify staff
+    const staff = await Staff.findById(staffId);
+    if (staff) {
+      staff.notifications.push({
+        title: "Doctor Consultation Rescheduled",
+        message: `Your consultation with Dr. ${doctor.name} has been rescheduled to ${newDateStr} at ${newTimeSlot}.`,
+        timestamp: new Date(),
+        bookingId: booking._id
+      });
+      await staff.save();
+
+      // Send email
+      const mailOptions = {
+        from: `"Credent Health" <${process.env.EMAIL}>`,
+        to: staff.email,
+        subject: "Your Doctor Consultation has been Rescheduled",
+        html: `
+          <h2>Consultation Rescheduled</h2>
+          <p>Hello ${staff.name},</p>
+          <p>Your consultation with <strong>Dr. ${doctor.name}</strong> has been rescheduled.</p>
+          <p><strong>Booking ID:</strong> ${booking.doctorConsultationBookingId}</p>
+          <p><strong>New Date:</strong> ${newDateStr}</p>
+          <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
+          <p><strong>Consultation Type:</strong> ${booking.type}</p>
+          <br>
+          <p>Thank you,<br>Team CredentHealth</p>
+        `
+      };
+
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log("✅ Reschedule email sent to:", staff.email);
+      } catch (err) {
+        console.error("❌ Email sending failed:", err);
+      }
+    }
+
+    res.status(200).json({
+      message: "Booking rescheduled successfully",
+      isSuccessfull: true,
+      booking,
+    });
+
+  } catch (error) {
+    console.error("❌ Error in rescheduling:", error);
+    res.status(500).json({
+      message: "Server error",
+      error: error.message,
+      isSuccessfull: false
+    });
+  }
+};
 
 
 
@@ -3869,7 +4484,7 @@ export const getSlotsByDiagnosticId = async (req, res) => {
     // IST current time
     const now = moment.tz("Asia/Kolkata");
 
-    // Function to process slots and filter out expired ones
+    // Function to process slots and filter out expired or booked ones
     const processSlots = (slotsArray) => {
       return (slotsArray || [])
         .filter(slot => slot.date === formattedDate)
@@ -3881,9 +4496,9 @@ export const getSlotsByDiagnosticId = async (req, res) => {
           );
           return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
         })
+        .filter(slot => !slot.isBooked)  // <-- exclude booked slots here
         .map(slotDoc => {
-          const slot = slotDoc.toObject(); // remove mongoose metadata
-
+          const slot = slotDoc.toObject ? slotDoc.toObject() : slotDoc; // mongoose doc to plain object
           return {
             _id: slot._id,
             day: slot.day,
@@ -3932,7 +4547,6 @@ export const getSlotsByDiagnosticId = async (req, res) => {
     return res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 };
-
 
 export const getHraByStaff = async (req, res) => {
   try {
@@ -4119,5 +4733,292 @@ export const confirmDeleteAccount = async (req, res) => {
   } catch (err) {
     console.error("Error in confirmDeleteAccount:", err);
     return res.status(500).json({ message: "Something went wrong" });
+  }
+};
+
+
+
+// Upload Doctor Report (by Staff)
+export const uploadDoctorReport = async (req, res) => {
+  try {
+    const { staffId, appointmentId } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No report file uploaded.' });
+    }
+
+    // Verify staff exists
+    const staff = await Staff.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ message: 'Staff not found.' });
+    }
+
+    const filePath = `/uploads/reports/${req.file.filename}`;
+
+    const booking = await Booking.findByIdAndUpdate(
+      appointmentId,
+      { $push: { receivedDoctorReports: filePath } }, // push into receivedDoctorReports
+      { new: true }
+    );
+
+    if (!booking) {
+      return res.status(404).json({ message: 'Appointment not found.' });
+    }
+
+    res.status(200).json({
+      message: 'Doctor report uploaded successfully by staff',
+      reportPath: filePath,
+      booking,
+    });
+  } catch (error) {
+    console.error('Error uploading doctor report:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+// Upload Doctor Prescription (by Staff)
+export const uploadDoctorPrescription = async (req, res) => {
+  try {
+    const { staffId, appointmentId } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No prescription file uploaded.' });
+    }
+
+    // Verify staff exists
+    const staff = await Staff.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ message: 'Staff not found.' });
+    }
+
+    const filePath = `/uploads/doctorprescription/${req.file.filename}`;
+
+    const booking = await Booking.findByIdAndUpdate(
+      appointmentId,
+      { $push: { receivedDoctorPrescriptions: filePath } }, // push into receivedDoctorPrescriptions
+      { new: true }
+    );
+
+    if (!booking) {
+      return res.status(404).json({ message: 'Appointment not found.' });
+    }
+
+    res.status(200).json({
+      message: 'Doctor prescription uploaded successfully by staff',
+      prescriptionPath: filePath,
+      booking,
+    });
+  } catch (error) {
+    console.error('Error uploading doctor prescription:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+
+
+
+// 🧾 Upload Diagnostic Report (staff only)
+export const uploadBookingReport = (req, res) => {
+  uploadDiagnosticReport(req, res, async function (err) {
+    if (err) {
+      console.error("❌ Multer Error:", err);
+      return res.status(400).json({ success: false, message: "File upload failed", error: err.message });
+    }
+
+    const { staffId, bookingId } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "No file uploaded" });
+    }
+
+    try {
+      const filePath = `/uploads/diagnosticReport/${req.file.filename}`;
+
+      const updatedBooking = await Booking.findByIdAndUpdate(
+        bookingId,
+        { $push: { receivedDiagReports: filePath } }, // staff uploads only
+        { new: true }
+      );
+
+      if (!updatedBooking) {
+        return res.status(404).json({ success: false, message: "Booking not found" });
+      }
+
+      // Notify staff
+      if (staffId) {
+        const staff = await Staff.findById(staffId);
+        if (staff) {
+          staff.notifications.push({
+            title: "Report Uploaded",
+            message: `You have successfully uploaded a report for booking ${bookingId}.`,
+            timestamp: new Date(),
+            bookingId
+          });
+          await staff.save();
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Report uploaded by staff successfully",
+        booking: updatedBooking
+      });
+    } catch (error) {
+      console.error("❌ Error updating booking with report:", error);
+      return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    }
+  });
+};
+
+// 🧾 Upload Diagnostic Prescription (staff only)
+export const uploadDiagnosticPrescription = (req, res) => {
+  uploadDiagPrescription(req, res, async function (err) {
+    if (err) {
+      console.error("❌ Multer Error:", err);
+      return res.status(400).json({ success: false, message: "File upload failed", error: err.message });
+    }
+
+    const { staffId, bookingId } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "No file uploaded" });
+    }
+
+    try {
+      const filePath = `/uploads/diagprescription/${req.file.filename}`;
+
+      const updatedBooking = await Booking.findByIdAndUpdate(
+        bookingId,
+        { $push: { receivedDiagPrescriptions: filePath } }, // staff uploads only
+        { new: true }
+      );
+
+      if (!updatedBooking) {
+        return res.status(404).json({ success: false, message: "Booking not found" });
+      }
+
+      // Notify staff
+      if (staffId) {
+        const staff = await Staff.findById(staffId);
+        if (staff) {
+          staff.notifications.push({
+            title: "Prescription Uploaded",
+            message: `You have successfully uploaded a prescription for booking ${bookingId}.`,
+            timestamp: new Date(),
+            bookingId
+          });
+          await staff.save();
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Prescription uploaded by staff successfully",
+        booking: updatedBooking
+      });
+    } catch (error) {
+      console.error("❌ Error updating booking:", error);
+      return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    }
+  });
+};
+
+
+
+export const handleUserMedicalUpload = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded.' });
+    }
+
+    // Check if staff exists
+    const staff = await Staff.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ message: 'Staff not found.' });
+    }
+
+    const filePath = `/uploads/userMedicalFiles/${req.file.filename}`;
+
+    // Push file path into staff's uploadedFiles array
+    staff.userUploadedFiles = staff.userUploadedFiles || [];
+    staff.userUploadedFiles.push(filePath);
+    await staff.save();
+
+    res.status(200).json({
+      message: 'File uploaded successfully by staff',
+      filePath,
+      staff
+    });
+  } catch (error) {
+    console.error('Error uploading user medical file:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+
+export const deleteStaff = async (req, res) => {
+  const { staffId } = req.params;
+
+  try {
+    // Check if staff exists
+    const staff = await Staff.findById(staffId);
+
+    if (!staff) {
+      return res.status(404).json({ message: 'Staff not found' });
+    }
+
+    // Delete the staff
+    await Staff.findByIdAndDelete(staffId);
+
+    return res.status(200).json({ message: 'Staff deleted successfully.' });
+  } catch (error) {
+    console.error('Error in deleteStaff:', error);
+    return res.status(500).json({ message: 'Something went wrong.' });
+  }
+};
+
+
+
+// Controller to handle support ticket creation
+export const createSupportTicket = async (req, res) => {
+  try {
+    const { staffId, reason, description } = req.body;
+
+    if (!staffId || !reason || !description) {
+      return res.status(400).json({ message: 'Staff ID, reason, and description are required.' });
+    }
+
+    // Check if the staff exists
+    const staff = await Staff.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ message: 'Staff not found.' });
+    }
+
+    // Upload file (if exists)
+    let filePath = '';
+    if (req.file) {
+      filePath = `/uploads/support-tickets/${req.file.filename}`;
+    }
+
+    // Create support ticket
+    const newTicket = new SupportTicket({
+      staffId,
+      reason,
+      description,
+      attachment: filePath,
+    });
+
+    await newTicket.save();
+    res.status(201).json({
+      message: 'Support ticket created successfully.',
+      ticket: newTicket,
+    });
+  } catch (error) {
+    console.error('Error creating support ticket:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 };

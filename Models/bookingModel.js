@@ -29,6 +29,23 @@ const bookingSchema = new mongoose.Schema({
     type: [String],
     default: [],
   },
+   receivedDoctorReports: {
+    type: [String],
+    default: []
+  },
+  receivedDoctorPrescriptions: {
+    type: [String],
+    default: []
+  },
+   userUploadedFiles: [
+    {
+      type: String, // File path (e.g., /uploads/userMedicalFiles/abc123.pdf)
+    }
+  ],
+
+   // Staff uploaded files
+  receivedDiagReports: { type: [String], default: [] },        // Staff uploaded diagnostic reports
+  receivedDiagPrescriptions: { type: [String], default: [] },  // Staff uploaded prescriptions
   serviceType: {
     type: String,
     enum: ["Home Collection", "Center Visit"],
