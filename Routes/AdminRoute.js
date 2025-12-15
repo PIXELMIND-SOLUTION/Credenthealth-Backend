@@ -150,10 +150,38 @@ import {
     getAllBannerImagesController,
     deleteBannerImageController,
     updateBannerImageController,
+    getAllHraSubmissions,
+    createQuestion,
+    getAllQuestions,
+    getAllAnswersQuestions,
+    editQuestion,
+    deleteQuestion,
+    addBranch,
+    updateBranch,
+    deleteBranch,
+    sendStaffCredentialsEmail,
+    createTestt,
+    createScann,
+    deleteScan,
+    sendBulkEmail,
+    updateStaffBranches,
+    sendBulkSMS,
+    addTestToStaffByAgeGroup,
+    addScansToStaffByAgeGroup,
+    getCompanyStaff,
+    bulkUpdateEmployeeId,
+    removePackageFromStaff,
+    removeTestFromStaff,
+    removeScanFromStaff,
+    getAllCompanyDiagnostics,
+    addAmountToAllStaff,
+    getAllCompanyDiagnosticsByUser,
+    getAllCompanyDiagnosticsByStaffPackages,
+    addDiagnosticMultipleSlots,
 } from '../Controller/ControllerAdmin.js';
 import multer from 'multer';
 import { uploadBlogImage, uploadCategoryCSV, uploadCategoryImage, uploadCompanyCSV, uploadDiagnosticImage, uploadImages, uploadPackageCSV, uploadPrescriptionFile, uploadReportFile, uploadTestCSV, uploadTestImage, uploadXrayCSV, uploadXrayImage } from '../config/multerConfig.js';
-import { createPackageBooking } from '../Controller/ControllerStaff.js';
+import { createPackageBooking, resetStaffArrays } from '../Controller/ControllerStaff.js';
 import { updateDoctorDetails } from '../Controller/doctorController.js';
 const upload = multer({ dest: 'uploads/' });
 
@@ -188,12 +216,20 @@ router.get('/gettest/:id', getDoctorTestsById);
 // Route to update doctor details
 // Route to create a new staff profile (admin only)
 router.post('/create-staff/:companyId', createStaffProfile);
+router.post("/send-credentials/:staffId/:companyId", sendStaffCredentialsEmail);
 router.post('/create-staffinbulk/:companyId', bulkUploadStaffProfiles);
 router.post('/addamount/:staffId/:companyId', addAmountToWallet);
+router.post('/add-amount-to-all/:companyId', addAmountToAllStaff);
+
 
 
 router.put("/editstaff/:staffId", editStaffProfile);
 router.delete("/deletestaff/:staffId", deleteStaffProfile);
+
+router.post("/send-bulk-email", sendBulkEmail);
+
+router.post('/sendbulksms', sendBulkSMS); // Route that calls the controller function
+
 
 
 
@@ -303,10 +339,20 @@ router.get('/rejectedappointments', getRejectedAppointments);
 router.get('/getcount', getCounts);
 
 router.post('/import-companies', upload.single('file'), importCompaniesFromExcel);
-router.post('/import-staffs', upload.single('file'), importStaffFromExcel);
+router.post('/import-staffs/:companyId', upload.single('file'), importStaffFromExcel);
+
+router.post(
+  "/bulk-update-employeeid",
+  upload.single("file"),
+  bulkUpdateEmployeeId
+);
 
 router.get('/getdashboardcount', getDashboardCounts);
 router.post('/add-packages', addTestsToStaffByAgeGroup);
+
+router.post('/add-tests', addTestToStaffByAgeGroup);
+router.post('/add-scans', addScansToStaffByAgeGroup);
+
 
 
 // Route to submit a section or multiple sections
@@ -326,6 +372,8 @@ router.post("/testsdiagnostic/:diagnosticId", uploadTestImage, createTestForDiag
 router.put("/updatetestsdiagnostic/:diagnosticId/:testId", uploadTestImage, updateTestForDiagnostic);
 router.delete("/deletetests/:diagnosticId/:testId", deleteTestForDiagnostic);
 router.get('/getdiagnostic/:diagnosticId', getAllTestsForDiagnostic);
+router.delete('/deletescan/:scanId', deleteScan); // ✅ GET route to fetch all tests
+
 
 
 
@@ -359,7 +407,17 @@ router.get("/single-xray/:xrayId", getXrayById);
 //create diagnostic
 router.post("/create-diagnostics", uploadImages,  createDiagnostic);
 
+// POST /api/admin/add-branch
+router.post("/add-branch", addBranch);
+
+// PUT /api/admin/update-branch/:branchId
+router.put("/update-branch/:branchId", updateBranch);
+
+// DELETE /api/admin/delete-branch/:branchId
+router.delete("/delete-branch/:branchId", deleteBranch);
+
 router.put('/add-slotfordiag/:diagnosticId', addDiagnosticSlot);
+router.post('/add-multiple-slots/:diagnosticId', addDiagnosticMultipleSlots);
 router.put('/update-slot/:diagnosticId', updateDiagnosticSlot);
 router.put('/delete-diagslot/:diagnosticId', deleteDiagnosticSlot);
 
@@ -427,6 +485,50 @@ router.delete('/delete-banner/:bannerId', deleteBannerImageController);
 
 // Route to update a banner image by ID
 router.put('/update-banner/:bannerId', updateBannerImageController);
+
+router.get('/allhrasubmission', getAllHraSubmissions);
+
+
+// Create a new question
+router.post('/create-question', createQuestion);
+
+// Get all questions
+router.get('/questions', getAllQuestions);
+router.get('/answers', getAllAnswersQuestions);
+router.put('/edit-question/:questionId', editQuestion);
+router.delete('/delete-question/:questionId', deleteQuestion);
+
+router.post('/create-test', createTestt);
+router.post('/create-scan', uploadXrayImage, createScann);
+
+router.put('/update-branches', updateStaffBranches);
+
+router.get('/companyusers/:companyId', getCompanyStaff);
+
+
+router.post("/uploadbulkids", bulkUpdateEmployeeId);
+
+
+// Delete package from staff (with validation)
+router.delete('/removepackages/:staffId', removePackageFromStaff);
+
+// Delete test from staff (with validation)
+router.delete('/removetests/:staffId', removeTestFromStaff);
+
+// Delete scan from staff (with validation)
+router.delete('/removescans/:staffId', removeScanFromStaff);
+
+router.post('/reset-staff-arrays', resetStaffArrays);
+
+
+router.get("/allcompaniesdiagnostics/:companyId", getAllCompanyDiagnostics);
+router.get("/allcompaniesdiagnostics/:companyId/:staffId", getAllCompanyDiagnosticsByUser);
+router.get("/allcompaniespackdiagnostics/:companyId/:staffId", getAllCompanyDiagnosticsByStaffPackages);
+
+
+
+
+
 
 
 

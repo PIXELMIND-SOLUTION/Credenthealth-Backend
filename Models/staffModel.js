@@ -5,6 +5,9 @@ const staffSchema = new mongoose.Schema({
   name: {
     type: String,
   },
+   employeeId: {
+    type: String,
+  },
   email: {
     type: String,
     unique: true,
@@ -13,11 +16,20 @@ const staffSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
-   idImage: {
+  userId: { 
+    type: String, 
+  },
+  dob: { 
+    type: Date, 
+  },
+  idImage: {
     type: String,
     default: null,
   },
   password: {
+    type: String,
+  },
+  address: {
     type: String,
   },
   gender: {
@@ -36,24 +48,28 @@ const staffSchema = new mongoose.Schema({
   contact_number: {
     type: String,
   },
-  // address: {
-  //   type: String,
-  // },
   myBookings: [
     {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Booking',
     },
   ],
+    termsAndConditionsAccepted: {
+    type: Boolean,
+    default: false
+  },
+  termsAcceptedAt: {
+    type: Date
+  },
   notifications: [
-  {
-    title: { type: String },
-    message: { type: String },
-    timestamp: { type: Date, default: Date.now },
-    bookingId: { type: mongoose.Schema.Types.ObjectId, ref: "Booking" }
-  }
-],
-   wallet_balance: {
+    {
+      title: { type: String },
+      message: { type: String },
+      timestamp: { type: Date, default: Date.now },
+      bookingId: { type: mongoose.Schema.Types.ObjectId, ref: "Booking" }
+    }
+  ],
+  wallet_balance: {
     type: Number,
     default: 0
   },
@@ -116,11 +132,11 @@ const staffSchema = new mongoose.Schema({
     {
       diagnosticId: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Diagnostic',  // Reference to the Diagnostic model
+        ref: 'Diagnostic',
       },
       testId: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Test',  // Reference to the Test model
+        ref: 'Test',
       },
       test_name: {
         type: String,
@@ -131,39 +147,80 @@ const staffSchema = new mongoose.Schema({
     },
   ],
 
-
   myPackages: [
+    {
+      diagnosticId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Diagnostic',
+      },
+      packageId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Package',
+      },
+      packageName: {
+        type: String,
+      },
+      price: {
+        type: Number,
+      },
+      offerPrice: {
+        type: Number,
+      },
+      tests: [
+        {
+          test_name: String,
+          description: String,
+          image: String,
+          _id: mongoose.Schema.Types.ObjectId,
+        }
+      ],
+    },
+  ],
+
+
+  myTests: [
   {
-    diagnosticId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Diagnostic',  // Reference Diagnostic model
-    },
-    packageId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Package', // You can create a separate Package model or keep as ObjectId
-    },
-    packageName: {
-      type: String,
-    },
-    price: {
-      type: Number,
-    },
-    offerPrice: {
-      type: Number,
-    },
-    tests: [
+    diagnosticId: { type: mongoose.Schema.Types.ObjectId, ref: "Diagnostic" },
+    testId: { type: mongoose.Schema.Types.ObjectId, ref: "Test" },
+    testName: String,
+    price: Number,
+    fastingRequired: Boolean,
+    homeCollectionAvailable: Boolean,
+    reportIn24Hrs: Boolean,
+    reportHour: Number,
+    description: String,
+    instruction: String,
+    precaution: String,
+    image: String,
+    subTests: [
       {
-        test_name: String,
-        description: String,
-        image: String,
-        _id: mongoose.Schema.Types.ObjectId,
+        name: String,
+        value: String
       }
-    ],
-  },
+    ]
+  }
 ],
 
 
- doctorAppointments: [
+myScans: [
+  {
+    diagnosticId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Diagnostic",
+    },
+    scanId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Xray",
+    },
+    title: String,
+    price: Number,
+    preparation: String,
+    reportTime: String,
+    image: String
+  }
+],
+
+  doctorAppointments: [
     {
       appointmentId: {
         type: mongoose.Schema.Types.ObjectId,
@@ -174,10 +231,10 @@ const staffSchema = new mongoose.Schema({
         ref: 'Doctor',
       },
       appointment_date: {
-        type: String, // e.g., "2025-04-28"
+        type: String,
       },
       appointment_time: {
-        type: String, // e.g., "10:30 AM"
+        type: String,
       },
       status: {
         type: String,
@@ -198,25 +255,26 @@ const staffSchema = new mongoose.Schema({
       },
     },
   ],
- myPackage: [
-  {
-    diagnosticId: { type: mongoose.Schema.Types.ObjectId, ref: "Diagnostic" },
-    packageId: { type: mongoose.Schema.Types.ObjectId },
-    packageName: String,
-    price: Number,
-    offerPrice: Number,
-    tests: [
-      {
-        testName: String,
-        description: String,
-        image: String,
-        testId: { type: mongoose.Schema.Types.ObjectId } // Test ka _id bhi store kr rahe hain
-      }
-    ]
-  }
-],
+  
+  myPackage: [
+    {
+      diagnosticId: { type: mongoose.Schema.Types.ObjectId, ref: "Diagnostic" },
+      packageId: { type: mongoose.Schema.Types.ObjectId },
+      packageName: String,
+      price: Number,
+      offerPrice: Number,
+      tests: [
+        {
+          testName: String,
+          description: String,
+          image: String,
+          testId: { type: mongoose.Schema.Types.ObjectId }
+        }
+      ]
+    }
+  ],
 
- // Staff uploaded reports/prescriptions
+  // Staff uploaded reports/prescriptions
   receivedDoctorReports: {
     type: [String],
     default: []
@@ -226,8 +284,8 @@ const staffSchema = new mongoose.Schema({
     default: []
   },
 
-   // 👇 Add Prescription field
-   prescription: [
+  // 👇 Add Prescription field
+  prescription: [
     {
       medicineName: { type: String },
       dosage: { type: String },
@@ -236,9 +294,9 @@ const staffSchema = new mongoose.Schema({
     }
   ],
   userUploadedFiles: {
-  type: [String],
-  default: []
-},
+    type: [String],
+    default: []
+  },
   myBlogs: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Blog'
@@ -261,6 +319,12 @@ const staffSchema = new mongoose.Schema({
     },
   ],
 
+    // Add the fcmToken field to store the Firebase Cloud Messaging token
+  fcmToken: {
+    type: String,
+    default: null,  // Default to null if no token is set
+  },
+
   addresses: [
     {
       street: { type: String },
@@ -272,13 +336,57 @@ const staffSchema = new mongoose.Schema({
     },
   ],
 
- steps: [
-  {
-    date: { type: Date, required: true },
-    day: { type: String },
-    stepsCount: { type: Number, required: true },
-  }
-],
+  steps: [
+    {
+      date: { type: Date, required: true },
+      day: { type: String },
+      stepsCount: { type: Number, required: true },
+    }
+  ],
+ 
+  // ✅ FIXED BRANCH FIELD - Custom setter use karo
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    default: null,
+    set: function(value) {
+      // ✅ Empty string, "null", "undefined" ko null karo
+      if (!value || value === '' || value === 'null' || value === 'undefined') {
+        return null;
+      }
+      // ✅ Valid ObjectId hai to use karo
+      if (mongoose.Types.ObjectId.isValid(value)) {
+        return value;
+      }
+      // ✅ Invalid hai to null karo
+      return null;
+    }
+  },
+
+  height: {
+    type: Number,
+    default: null,
+  },
+  weight: {
+    type: Number,
+    default: null,
+  },
+  BP: {
+    type: String,
+    default: null,
+  },
+  BMI: {
+    type: Number,
+    default: null,
+  },
+  eyeCheckupResults: {
+    type: String,
+    default: null,
+  },
+  eyeSight: {
+    type: String,
+    default: null,
+  },
 
   issues: [
     {
@@ -291,9 +399,58 @@ const staffSchema = new mongoose.Schema({
       updatedAt: { type: Date, default: Date.now },
     },
   ],
+  // ✅ NEW: Add these fields for email tracking
+  mailSent: { 
+    type: Boolean, 
+    default: false 
+  },
+  mailSentAt: { 
+    type: Date 
+  },
   deleteToken: { type: String, default: null },
   deleteTokenExpiration: { type: Date, default: null },
-}, { timestamps: true });
+}, { 
+  timestamps: true 
+});
+
+// ✅ UNIVERSAL MIDDLEWARE: Har operation se pehle branch field ko clean karo
+staffSchema.pre('save', function(next) {
+  this.branch = this.branch;
+  next();
+});
+
+staffSchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany', 'update'], function(next) {
+  const update = this.getUpdate();
+  
+  const cleanBranch = (obj) => {
+    if (obj && typeof obj === 'object') {
+      if ('branch' in obj) {
+        if (!obj.branch || obj.branch === '' || obj.branch === 'null' || obj.branch === 'undefined') {
+          obj.branch = null;
+        } else if (!mongoose.Types.ObjectId.isValid(obj.branch)) {
+          obj.branch = null;
+        }
+      }
+      if ('$set' in obj && obj.$set && typeof obj.$set === 'object') {
+        cleanBranch(obj.$set);
+      }
+    }
+  };
+  
+  cleanBranch(update);
+  next();
+});
+
+// ✅ Query middleware bhi add karo
+staffSchema.pre(['find', 'findOne'], function(next) {
+  const query = this.getQuery();
+  
+  if (query.branch === '' || query.branch === 'null' || query.branch === 'undefined') {
+    this.setQuery({ ...query, branch: null });
+  }
+  
+  next();
+});
 
 const Staff = mongoose.model('Staff', staffSchema);
 export default Staff;

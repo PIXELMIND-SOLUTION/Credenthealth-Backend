@@ -65,6 +65,14 @@ import { getWalletBalance,
   handleUserMedicalUpload,
   deleteStaff,
   createSupportTicket,
+  submitQustionAnswer,
+  staffForgotPassword,
+  getProfileStaff,
+  editProfileStaff,
+  changePasswordStaff,
+  saveFcmToken,
+  getStaffScans,
+  getStaffTests,
 
 
 
@@ -76,6 +84,7 @@ const router = express.Router();
 
 // Route for staff login
 router.post('/login-staff', staffLogin);
+router.post('/save-fcm-token', saveFcmToken);
 router.post('/logout', staffLogout);
 router.get('/wallet/:staffId', getWalletBalance);
 router.post('/bookappoint', bookAppointment);
@@ -91,6 +100,9 @@ router.delete('/removefamily/:staffId/:familyMemberId', removeFamilyMember);
 router.post('/uploadProfileImage/:staffId', uploadProfileImage);
 router.put('/updateProfileImage/:staffId', updateProfileImage);  // update existing
 router.get('/getprofile/:staffId', getMyProfile);  // update existing
+router.get('/staffprofile/:staffId', getProfileStaff);
+router.put('/editprofile/:staffId', editProfileStaff);
+
 
 // Route for creating a new address for a staff member
 router.post('/create-address/:staffId', createStaffAddress);
@@ -119,6 +131,8 @@ router.get('/singlestafftestpackages/:staffId/:packageId', getSingleStaffTestPac
 router.get('/getPrescription/:staffId', getPrescription);
 router.post('/addpackages', addDiagnosticTestsToStaff);
 router.get('/getpackage-test/:staffId', getStaffPackages);
+router.get('/getscans/:staffId', getStaffScans);
+router.get('/gettests/:staffId', getStaffTests);
 router.post('/submit-hra/:staffId', submitAnswer);
 router.post('/addsteps/:staffId', addOrUpdateStaffSteps); // POST: To add/update steps
 router.get('/steps/:staffId', getStaffStepsHistory); // GET: To fetch staff's step history
@@ -184,6 +198,13 @@ router.put(
 
 router.delete('/deleteaccount/:staffId', deleteStaff);
 router.post('/support-ticket', uploadHelpFile, createSupportTicket);
+
+router.post('/submit-questionanswer', submitQustionAnswer);
+
+router.post('/forgot-password', staffForgotPassword);
+
+router.put('/changepassword/:staffId', changePasswordStaff);
+
 
 
 

@@ -33,6 +33,14 @@ import moment from "moment-timezone";
 import cron from "node-cron";
 import Employee from '../Models/Employee.js';
 import Banner from '../Models/Banner.js';
+import { HraSubmission } from '../Models/HraSubmission.js';
+import SimpleQuestion from '../Models/SimpleQuestion.js';
+import admin from 'firebase-admin';
+import * as functions from 'firebase-functions';
+import csvParser from "csv-parser";
+import Cart from '../Models/Cart.js';
+
+
 
 
 dotenv.config();
@@ -40,6 +48,19 @@ dotenv.config();
 // ✅ Replace __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Path to your service account JSON
+const serviceAccountPath = path.join(__dirname, '../serviceAccountKey.json');
+
+// Read JSON file
+const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+
+// Initialize Firebase Admin SDK with service account credentials
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+
 
 
 dayjs.extend(customParseFormat);
@@ -369,19 +390,23 @@ export const updateDoctorDetails = async (req, res) => {
 };
 
 
+
+
 export const createStaffProfile = async (req, res) => {
   try {
     const { companyId } = req.params;
 
+    // Check valid company ID
     if (!mongoose.Types.ObjectId.isValid(companyId)) {
       return res.status(400).json({ message: "Invalid company ID format" });
     }
 
+    // Handle file uploads
     uploadStaffImages(req, res, async (err) => {
       if (err) {
         return res.status(400).json({
-          message: 'File upload error',
-          error: err.message
+          message: "File upload error",
+          error: err.message,
         });
       }
 
@@ -397,17 +422,34 @@ export const createStaffProfile = async (req, res) => {
         department,
         designation,
         role,
+        branch,
+        employeeId,
       } = req.body;
 
-      // 🔍 Check if staff exists
-      const existingStaff = await Staff.findOne({ email });
-      if (existingStaff) {
+      // Validate required fields including employeeId
+      if (!employeeId) {
         return res.status(400).json({
-          message: "Staff with this email already exists"
+          message: "Employee ID is required",
         });
       }
 
-      // 📁 Uploaded Files
+      // Check if staff with same email exists
+      const existingStaffByEmail = await Staff.findOne({ email });
+      if (existingStaffByEmail) {
+        return res.status(400).json({
+          message: "Staff with this email already exists",
+        });
+      }
+
+      // Check if staff with same employee ID exists
+      const existingStaffByEmployeeId = await Staff.findOne({ employeeId });
+      if (existingStaffByEmployeeId) {
+        return res.status(400).json({
+          message: "Staff with this Employee ID already exists",
+        });
+      }
+
+      // Handle uploaded images
       const profileImage = req.files?.profileImage?.[0]
         ? `/uploads/staffimages/${req.files.profileImage[0].filename}`
         : null;
@@ -416,8 +458,12 @@ export const createStaffProfile = async (req, res) => {
         ? `/uploads/staffimages/${req.files.idImage[0].filename}`
         : null;
 
-      // 🧾 Create staff
+      // Make branch optional
+      const branchValue = branch && branch !== "" ? branch : null;
+
+      // Create staff with employeeId
       const staff = new Staff({
+        employeeId, // ✅ Employee ID manually entered by user
         name,
         email,
         password,
@@ -429,6 +475,7 @@ export const createStaffProfile = async (req, res) => {
         department,
         designation,
         role: role || "Staff",
+        branch: branchValue,
         wallet_balance: 0,
         profileImage,
         idImage,
@@ -436,12 +483,13 @@ export const createStaffProfile = async (req, res) => {
 
       const savedStaff = await staff.save();
 
-      // 📦 Full staff info to push in company
+      // Prepare staff info for company
       const staffInfoForCompany = {
         _id: savedStaff._id,
+        employeeId: savedStaff.employeeId, // ✅ Include employeeId in company staff array
         name: savedStaff.name,
         role: savedStaff.role,
-        contact_number: savedStaff.contact_number, // ✅ ensure this field matches schema
+        contact_number: savedStaff.contact_number,
         email: savedStaff.email,
         dob: savedStaff.dob,
         gender: savedStaff.gender,
@@ -452,9 +500,12 @@ export const createStaffProfile = async (req, res) => {
         wallet_balance: savedStaff.wallet_balance,
         department: savedStaff.department,
         designation: savedStaff.designation,
+        branch: savedStaff.branch || null,
+        mailSent: false,
+        mailSentAt: null
       };
 
-      // 🔗 Push to company
+      // Push staff to company's staff array
       const updatedCompany = await Company.findByIdAndUpdate(
         companyId,
         { $push: { staff: staffInfoForCompany } },
@@ -462,27 +513,22 @@ export const createStaffProfile = async (req, res) => {
       );
 
       if (!updatedCompany) {
-        await Staff.findByIdAndDelete(savedStaff._id); // rollback
+        await Staff.findByIdAndDelete(savedStaff._id);
         return res.status(404).json({ message: "Company not found" });
       }
 
+      // Respond success
       res.status(201).json({
-        message: "Staff created and linked to company successfully",
-        staff: {
-          id: savedStaff._id,
-          name: savedStaff.name,
-          email: savedStaff.email,
-          role: savedStaff.role,
-          department: savedStaff.department,
-          designation: savedStaff.designation,
-        },
+        message: "Staff created successfully",
+        staffId: savedStaff._id,
+        employeeId: savedStaff.employeeId, // ✅ Return employeeId in response
+        staff: savedStaff,
         company: {
           id: updatedCompany._id,
           name: updatedCompany.name,
         },
       });
     });
-
   } catch (error) {
     console.error("❌ Staff creation error:", error);
     res.status(500).json({
@@ -493,6 +539,369 @@ export const createStaffProfile = async (req, res) => {
 };
 
 
+export const sendStaffCredentialsEmail = async (req, res) => {
+  try {
+    const { staffId, companyId } = req.params;
+
+    if (!staffId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Staff ID is required'
+      });
+    }
+
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Company ID is required'
+      });
+    }
+
+    // Find staff
+    const staff = await Staff.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Staff not found" 
+      });
+    }
+
+    // Email Transporter
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: "support@credenthealth.com",
+        pass: "jwrxbxngjlbphydn",
+      },
+    });
+
+    // ✅ FULL EMAIL CONTENT EXACTLY LIKE YOUR ORIGINAL
+    const mailOptions = {
+      from: "support@credenthealth.com",
+      to: staff.email,
+      subject: "Your CredentHealth Login Credentials",
+      text: `Dear ${staff.name},\n
+Your account on the CredentHealth Portal has been successfully created. Please find your login details below:\n
+Website: https://credenthealth.com/\n
+Login ID: ${staff.email}
+Password: ${staff.password}\n
+You may now log in using the above credentials to access your account and portal services.\n
+If you require any assistance, please reach out to our support team at support@credenthealth.com.\n
+Thank you for choosing CredentHealth.\n
+Warm regards,
+Team CredentHealth
+CredentHealth | Elthium Healthcare Pvt. Ltd.
+https://credenthealth.com/`
+    };
+
+    // Send Email
+    await transporter.sendMail(mailOptions);
+
+    // ✅ UPDATE 1: Staff document mein mailSent field ko true karo
+    await Staff.findByIdAndUpdate(
+      staffId,
+      { 
+        $set: { 
+          mailSent: true,
+          mailSentAt: new Date()
+        } 
+      },
+      { new: true }
+    );
+
+    // ✅ UPDATE 2: Company ke staff array mein add/update karo
+    const companyUpdateResult = await Company.findByIdAndUpdate(
+      companyId,
+      {
+        $addToSet: {
+          staff: {
+            _id: staff._id,
+            userId: staff.userId,
+            name: staff.name,
+            role: staff.role,
+            contact_number: staff.contact_number,
+            email: staff.email,
+            dob: staff.dob,
+            gender: staff.gender,
+            age: staff.age,
+            address: staff.address,
+            profileImage: staff.profileImage,
+            idImage: staff.idImage,
+            wallet_balance: staff.wallet_balance || 0,
+            department: staff.department,
+            designation: staff.designation,
+            branch: staff.branch,
+            mailSent: true,
+            mailSentAt: new Date()
+          }
+        }
+      },
+      { new: true }
+    );
+
+    if (!companyUpdateResult) {
+      console.warn(`⚠️ Company with ID ${companyId} not found`);
+    }
+
+    console.log(`✅ Email sent successfully to ${staff.email}`);
+    console.log(`✅ Updated mailSent field for staff ${staffId}`);
+    console.log(`✅ Added/Updated staff in company ${companyId}`);
+
+    res.status(200).json({
+      success: true,
+      message: "Credentials email sent successfully",
+      staffId: staff._id,
+      email: staff.email,
+      mailSent: true,
+      mailSentAt: new Date(),
+      companyUpdated: !!companyUpdateResult
+    });
+
+  } catch (error) {
+    console.error("❌ Email sending error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Email sending failed",
+      error: error.message,
+    });
+  }
+};
+
+
+export const sendBulkEmail = async (req, res) => {
+  try {
+    const { staffIds, companyId } = req.body;
+
+    if (!staffIds || !Array.isArray(staffIds) || staffIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Staff IDs are required'
+      });
+    }
+
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Company ID is required'
+      });
+    }
+
+    // Email Transporter Setup
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: "support@credenthealth.com",
+        pass: "jwrxbxngjlbphydn",
+      },
+    });
+
+    // Fetch all staff members from database
+    const staffMembers = await Staff.find({ 
+      _id: { $in: staffIds } 
+    });
+
+    if (staffMembers.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No staff members found with the provided IDs'
+      });
+    }
+
+    // Send email to each staff member
+    const emailPromises = staffMembers.map(async (staff) => {
+      const mailOptions = {
+        from: "support@credenthealth.com",
+        to: staff.email,
+        subject: "Your CredentHealth Login Credentials",
+        text: `Dear ${staff.name},\n
+Your account on the CredentHealth Portal has been successfully created. Please find your login details below:\n
+Website: https://credenthealth.com/\n
+Login ID: ${staff.email}
+Password: ${staff.password}\n
+You may now log in using the above credentials to access your account and portal services.\n
+If you require any assistance, please reach out to our support team at support@credenthealth.com.\n
+Thank you for choosing CredentHealth.\n
+Warm regards,
+Team CredentHealth
+CredentHealth | Elthium Healthcare Pvt. Ltd.
+https://credenthealth.com/`
+      };
+
+      return transporter.sendMail(mailOptions);
+    });
+
+    // Wait for all emails to be sent
+    await Promise.all(emailPromises);
+
+    // ✅ UPDATE 1: Staff documents mein mailSent field ko true karo
+    const updateStaffPromises = staffMembers.map(async (staff) => {
+      return Staff.findByIdAndUpdate(
+        staff._id,
+        { 
+          $set: { 
+            mailSent: true,
+            mailSentAt: new Date()
+          } 
+        },
+        { new: true }
+      );
+    });
+
+    await Promise.all(updateStaffPromises);
+
+    // ✅ UPDATE 2: Company ke staff array mein add/update karo
+    const companyUpdateResult = await Company.findByIdAndUpdate(
+      companyId,
+      {
+        $addToSet: {
+          staff: {
+            $each: staffMembers.map(staff => ({
+              _id: staff._id,
+              userId: staff.userId,
+              name: staff.name,
+              role: staff.role,
+              contact_number: staff.contact_number,
+              email: staff.email,
+              dob: staff.dob,
+              gender: staff.gender,
+              age: staff.age,
+              address: staff.address,
+              profileImage: staff.profileImage,
+              idImage: staff.idImage,
+              wallet_balance: staff.wallet_balance || 0,
+              department: staff.department,
+              designation: staff.designation,
+              branch: staff.branch,
+              mailSent: true, // ✅ Add mailSent field
+              mailSentAt: new Date() // ✅ Add mailSentAt timestamp
+            }))
+          }
+        }
+      },
+      { new: true }
+    );
+
+    if (!companyUpdateResult) {
+      console.warn(`⚠️ Company with ID ${companyId} not found`);
+    }
+
+    console.log(`✅ Bulk email sent successfully to ${staffMembers.length} staff members`);
+    console.log(`✅ Updated mailSent field for ${staffMembers.length} staff members`);
+    console.log(`✅ Added/Updated ${staffMembers.length} staff in company ${companyId}`);
+
+    res.status(200).json({
+      success: true,
+      message: `Email sent successfully to ${staffMembers.length} users`,
+      sentCount: staffMembers.length,
+      staffEmails: staffMembers.map(staff => staff.email),
+      mailSentUpdated: true,
+      companyUpdated: true
+    });
+
+  } catch (error) {
+    console.error("❌ Bulk email sending error:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Email sending failed',
+      error: error.message
+    });
+  }
+};
+
+
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount),
+// });
+
+// Function to send push notifications via FCM
+const sendPushNotification = (staff) => {
+  const message = {
+    notification: {
+      title: 'Account Created',
+      body: `Dear ${staff.name}, your account has been created. Login ID: ${staff.email}, Password: ${staff.password}`,
+    },
+    token: staff.fcmToken,  // FCM token stored in the database
+  };
+
+  console.log(`Sending push notification to ${staff.name} (${staff.email})`);
+  console.log('Message Details:', message);
+
+  return admin.messaging().send(message)
+    .then(response => ({
+      name: staff.name,
+      email: staff.email,
+      status: 'success',
+      response
+    }))
+    .catch(error => ({
+      name: staff.name,
+      email: staff.email,
+      status: 'failed',
+      error: error.message
+    }));
+};
+
+// Function to handle bulk sending notifications
+export const sendBulkSMS = functions.https.onRequest(async (req, res) => {
+  const { staffIds, companyId } = req.body;
+
+  // Read projectId / productId from query parameter
+  const projectId = req.query.projectId || 'Not Provided';
+  console.log('Project / Product ID from query:', projectId);
+
+  if (!staffIds || !Array.isArray(staffIds) || staffIds.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Staff IDs are required',
+      projectId
+    });
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: 'Company ID is required',
+      projectId
+    });
+  }
+
+  try {
+    const staffMembers = await Staff.find({ '_id': { $in: staffIds } }).exec();
+
+    if (staffMembers.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No staff members found with the provided IDs',
+        projectId
+      });
+    }
+
+    console.log(`Fetched ${staffMembers.length} staff members from the database.`);
+    staffMembers.forEach(staff => {
+      console.log(`Staff Details: Name - ${staff.name}, Email - ${staff.email}, FCM Token - ${staff.fcmToken}`);
+    });
+
+    const notificationResults = await Promise.all(staffMembers.map(staff => sendPushNotification(staff)));
+
+    console.log('Notification Results:', notificationResults);
+
+    res.status(200).json({
+      success: true,
+      message: `Push notifications sent successfully to ${staffMembers.length} staff members`,
+      projectId,                // Added projectId to response
+      results: notificationResults
+    });
+
+  } catch (error) {
+    console.error('Error sending bulk notifications:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error sending bulk notifications',
+      projectId,
+      error: error.message
+    });
+  }
+});
 
 export const editStaffProfile = async (req, res) => {
   const { staffId } = req.params;
@@ -502,24 +911,34 @@ export const editStaffProfile = async (req, res) => {
   }
 
   try {
-    const updatedFields = req.body; // Yeh saare fields dynamically handle karega
+    const updatedFields = req.body; // Dynamically handle all fields
 
-    // 1. Update the staff document directly
+    // 1. Update Staff model
     await Staff.findByIdAndUpdate(staffId, updatedFields, {
       new: true,
       runValidators: true,
     });
 
-    // 2. Re-fetch the updated staff
+    // 2. Fetch updated staff
     const updatedStaff = await Staff.findById(staffId);
 
     if (!updatedStaff) {
       return res.status(404).json({ message: "Staff not found" });
     }
 
-    // 3. Dynamically build the $set object for Company.staff[]
+    // 3. Prepare allowed fields to update inside Company.staff[]
     const companyUpdateFields = {};
-    const allowedFields = ["name", "role", "contact_number", "email", "dob", "gender", "age", "address"];
+    const allowedFields = [
+      "name",
+      "role",
+      "contact_number",
+      "email",
+      "dob",
+      "gender",
+      "age",
+      "address",
+      "branch"   // ✅ Added branch support
+    ];
 
     allowedFields.forEach((field) => {
       if (updatedFields[field] !== undefined) {
@@ -528,7 +947,7 @@ export const editStaffProfile = async (req, res) => {
       }
     });
 
-    // 4. Update embedded staff inside company if any field matches
+    // 4. Update embedded staff inside Company model
     if (Object.keys(companyUpdateFields).length > 0) {
       await Company.updateOne(
         { "staff._id": staffId },
@@ -1031,66 +1450,336 @@ export const deleteDiagnosticDetails = async (req, res) => {
   }
 };
 
+// controllers/staffController.js
 export const addAmountToWallet = async (req, res) => {
   try {
-    const { staffId, companyId } = req.params;
+    const { staffId, companyId } = req.params; // companyId bhi aayega but hum sirf check karenge
     const { forTests = 0, forDoctors = 0, forPackages = 0, from = "Admin" } = req.body;
+
+    console.log('Received request for staff:', staffId);
 
     const totalAmount = forTests + forDoctors + forPackages;
 
     if (totalAmount <= 0) {
-      return res.status(400).json({ message: 'Amount must be greater than zero' });
+      return res.status(400).json({ 
+        success: false,
+        message: 'Amount must be greater than zero' 
+      });
     }
 
-    // ✅ Step 1: Validate company
+    // 1. Pehle company check karo
     const company = await Company.findById(companyId);
     if (!company) {
-      return res.status(404).json({ message: "Company not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Company not found" 
+      });
     }
 
-    // ✅ Step 2: Find staff
+    // 2. Check karo ki staff company ke staff array mein hai
+    if (!company.staff || !Array.isArray(company.staff)) {
+      return res.status(404).json({ 
+        success: false,
+        message: "No staff found in company" 
+      });
+    }
+
+    // Staff ID ko string mein convert karo for comparison
+    const staffExists = company.staff.some(staff => {
+      if (!staff || !staff._id) return false;
+      
+      // Check both string and ObjectId formats
+      const staffIdStr = typeof staff._id === 'object' ? staff._id.toString() : staff._id;
+      return staffIdStr === staffId;
+    });
+
+    console.log('Staff exists in company array:', staffExists);
+    console.log('Company staff IDs:', company.staff.map(s => s?._id));
+
+    if (!staffExists) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Staff not found in this company's staff list" 
+      });
+    }
+
+    // 3. Ab directly Staff DB mein update karo
     const staff = await Staff.findById(staffId);
+    
     if (!staff) {
-      return res.status(404).json({ message: "Staff not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Staff not found in database" 
+      });
     }
 
-    // ✅ Step 3: Update wallet values
-    staff.wallet_balance += totalAmount;
-    staff.forTests += forTests;
-    staff.forDoctors += forDoctors;
-    staff.forPackages += forPackages;
+    // 4. Update wallet
+    staff.wallet_balance = (staff.wallet_balance || 0) + totalAmount;
+    staff.forTests = (staff.forTests || 0) + forTests;
+    staff.forDoctors = (staff.forDoctors || 0) + forDoctors;
+    staff.forPackages = (staff.forPackages || 0) + forPackages;
     staff.totalAmount = staff.forTests + staff.forDoctors + staff.forPackages;
 
-    // ✅ Step 4: Add wallet log (AFTER updating totals)
+    // 5. Add log
+    if (!staff.wallet_logs) {
+      staff.wallet_logs = [];
+    }
+    
     staff.wallet_logs.push({
       type: "credit",
       forTests,
       forDoctors,
       forPackages,
       totalAmount,
-      from
+      from,
+      date: new Date()
     });
 
     await staff.save();
 
     return res.status(200).json({
-      message: "Amount added to wallet successfully",
+      success: true,
+      message: "Amount added successfully",
+      staffId: staff._id,
+      staffName: staff.name,
+      employeeId: staff.employeeId || 'N/A',
       wallet_balance: staff.wallet_balance,
       forTests: staff.forTests,
       forDoctors: staff.forDoctors,
       forPackages: staff.forPackages,
-      totalAmount: staff.totalAmount,
-      latestLog: staff.wallet_logs.at(-1)
+      totalAmount: staff.totalAmount
     });
 
   } catch (error) {
     console.error("Error in addAmountToWallet:", error);
-    return res.status(500).json({ message: "Internal Server Error", error: error.message });
+    return res.status(500).json({ 
+      success: false,
+      message: "Internal Server Error", 
+      error: error.message 
+    });
   }
 };
 
 
+// Add amount to selected staff members
+export const addAmountToAllStaff = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const { 
+      staffIds, // Array of selected staff IDs
+      forTests = 0, 
+      forDoctors = 0, 
+      forPackages = 0, 
+      from = "Admin" 
+    } = req.body;
 
+    console.log('Adding amount to selected staff:', {
+      companyId,
+      staffIds,
+      staffCount: staffIds?.length || 0,
+      forTests,
+      forDoctors,
+      forPackages
+    });
+
+    const totalAmount = forTests + forDoctors + forPackages;
+
+    // Validate inputs
+    if (!staffIds || !Array.isArray(staffIds) || staffIds.length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Please select at least one staff member' 
+      });
+    }
+
+    if (totalAmount <= 0) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Amount must be greater than zero' 
+      });
+    }
+
+    // 1. Company check
+    const company = await Company.findById(companyId);
+    if (!company) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Company not found" 
+      });
+    }
+
+    // 2. Get all staff from company to validate
+    if (!company.staff || !Array.isArray(company.staff) || company.staff.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        message: "No staff found in this company" 
+      });
+    }
+
+    const companyStaffIds = company.staff
+      .filter(staff => staff && staff._id)
+      .map(staff => typeof staff._id === 'object' ? staff._id.toString() : staff._id);
+
+    // 3. Validate that selected staff belong to this company
+    const invalidStaffIds = [];
+    const validStaffIds = [];
+
+    staffIds.forEach(staffId => {
+      if (companyStaffIds.includes(staffId.toString())) {
+        validStaffIds.push(staffId.toString());
+      } else {
+        invalidStaffIds.push(staffId.toString());
+      }
+    });
+
+    if (invalidStaffIds.length > 0) {
+      console.log('Invalid staff IDs (not in company):', invalidStaffIds);
+    }
+
+    if (validStaffIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'None of the selected staff belong to this company',
+        invalidStaffIds
+      });
+    }
+
+    console.log('Valid staff IDs to update:', validStaffIds);
+    console.log('Total selected staff count:', validStaffIds.length);
+
+    const results = {
+      totalSelected: staffIds.length,
+      validStaffCount: validStaffIds.length,
+      invalidStaffCount: invalidStaffIds.length,
+      updatedCount: 0,
+      failedCount: 0,
+      successStaff: [],
+      failedStaff: [],
+      invalidStaffIds
+    };
+
+    // 4. Update each valid staff member
+    for (const staffId of validStaffIds) {
+      try {
+        const staff = await Staff.findById(staffId);
+        
+        if (!staff) {
+          console.log(`Staff ${staffId} not found in database`);
+          results.failedCount++;
+          results.failedStaff.push({
+            staffId,
+            error: "Staff not found in database",
+            name: "Unknown"
+          });
+          continue;
+        }
+
+        // Store old values for logging
+        const oldBalance = staff.wallet_balance || 0;
+        const oldTests = staff.forTests || 0;
+        const oldDoctors = staff.forDoctors || 0;
+        const oldPackages = staff.forPackages || 0;
+
+        // Update wallet
+        staff.wallet_balance = oldBalance + totalAmount;
+        staff.forTests = oldTests + forTests;
+        staff.forDoctors = oldDoctors + forDoctors;
+        staff.forPackages = oldPackages + forPackages;
+        staff.totalAmount = staff.forTests + staff.forDoctors + staff.forPackages;
+
+        // Update history if field exists
+        if (!staff.history) {
+          staff.history = [];
+        }
+        staff.history.push({
+          type: "wallet_credit",
+          amount: totalAmount,
+          from,
+          date: new Date(),
+          details: {
+            forTests,
+            forDoctors,
+            forPackages,
+            oldBalance,
+            newBalance: staff.wallet_balance
+          }
+        });
+
+        // Add wallet log
+        if (!staff.wallet_logs) {
+          staff.wallet_logs = [];
+        }
+        
+        staff.wallet_logs.push({
+          type: "credit",
+          forTests,
+          forDoctors,
+          forPackages,
+          totalAmount,
+          from,
+          date: new Date(),
+          details: {
+            addedBy: req.user?.name || "Admin",
+            company: company.company_name || "Unknown Company"
+          }
+        });
+
+        await staff.save();
+        results.updatedCount++;
+        results.successStaff.push({
+          staffId,
+          name: staff.name,
+          employeeId: staff.employeeId,
+          oldBalance,
+          newBalance: staff.wallet_balance,
+          addedAmount: totalAmount
+        });
+        
+        console.log(`Updated staff ${staffId} (${staff.name}) - Added ₹${totalAmount}`);
+        
+      } catch (error) {
+        console.error(`Error updating staff ${staffId}:`, error);
+        results.failedCount++;
+        
+        const staff = await Staff.findById(staffId).select('name employeeId');
+        results.failedStaff.push({
+          staffId,
+          error: error.message,
+          name: staff?.name || "Unknown",
+          employeeId: staff?.employeeId
+        });
+      }
+    }
+
+    // 5. Prepare response
+    const response = {
+      success: true,
+      message: `Amount added to ${results.updatedCount} out of ${results.validStaffCount} selected staff members`,
+      summary: results,
+      amountDetails: {
+        forTests,
+        forDoctors,
+        forPackages,
+        totalAmount,
+        totalAdded: totalAmount * results.updatedCount
+      },
+      timestamp: new Date().toISOString()
+    };
+
+    console.log('API Response:', JSON.stringify(response, null, 2));
+
+    return res.status(200).json(response);
+
+  } catch (error) {
+    console.error("Error in addAmountToSelectedStaff:", error);
+    return res.status(500).json({ 
+      success: false,
+      message: "Internal Server Error", 
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+};
 
 // ✅ Slot Generation Function
 const generateDefaultSlots = () => {
@@ -1141,59 +1830,99 @@ countdownCronJob();
 
 
 
-// ✅ Weekly Slot Generation Cron Job
-const weeklySlotCronJob = () => {
-  const interval = setInterval(async () => {
-    const currentDay = moment().day(); // Get current day (0 = Sunday, 1 = Monday, etc.)
-    
-    if (currentDay === 0) {  // Check if today is Sunday
-      console.log("🌟 Cron job triggered! It's Sunday! Generating slots...");
+// ✅ Generate 30-min slots from 6 AM to 7 PM (adjusting for the required times)
+const generateSlotsForWeek = (startTime, endTime) => {
+  const slots = [];
+  let current = moment(startTime);
 
-      try {
-        // Assuming you have a Doctor model and using async-await to fetch doctors
-        const doctors = await Doctor.find();  // Replace with actual Doctor fetch method
+  while (current.isBefore(endTime)) {
+    slots.push({
+      day: current.format('dddd'), // Day of the week (e.g., "Monday")
+      date: current.format('YYYY-MM-DD'), // Date in "YYYY-MM-DD" format
+      timeSlot: current.format('HH:mm'), // Time of the slot (e.g., "12:30")
+      isBooked: false, // Default to false, assuming slot is not booked
+    });
+    current.add(30, 'minutes'); // Increment by 30 minutes for the next slot
+  }
 
-        for (const doc of doctors) {
-          const newSlots = generateDefaultSlots();  // Generate slots for the next week
+  return slots;
+};
 
-          // Update the doctor's slots based on consultation type
-          if (doc.consultation_type === 'Online' || doc.consultation_type === 'Both') {
-            doc.onlineSlots.push(...newSlots);  // Add new slots to onlineSlots
-          }
+// ✅ Function to generate slots for all doctors and diagnostic slots for the week
+const generateWeeklySlotsForDoctorsAndDiagnostics = async () => {
+  try {
+    const doctors = await Doctor.find(); // Fetch all doctors
 
-          if (doc.consultation_type === 'Offline' || doc.consultation_type === 'Both') {
-            doc.offlineSlots.push(...newSlots);  // Add new slots to offlineSlots
-          }
+    // Loop through each day of the week (Monday to Saturday)
+    for (let i = 0; i < 6; i++) { // 6 days: Monday to Saturday
+      const startTime = moment().startOf('week').add(i + 1, 'days').hour(6).minute(0).second(0); // 6 AM on the specific day
+      const endTime = moment(startTime).hour(19).minute(0).second(0); // 7 PM on the same day
 
-          await doc.save();  // Save the updated doctor
+      for (const doc of doctors) {
+        const newSlots = generateSlotsForWeek(startTime, endTime);
 
-          // Log the doctor and their newly added slots
-          console.log(`✅ Weekly slots auto-generated for Dr. ${doc.name}`);
-          console.log(`🗓 New slots generated for the upcoming week for Dr. ${doc.name} (${doc.consultation_type} consultation)`);
+        // Update slots based on consultation type for doctors
+        if (doc.consultation_type === 'Online' || doc.consultation_type === 'Both') {
+          doc.onlineSlots.push(...newSlots);
         }
-      } catch (err) {
-        console.error('❌ Error generating weekly doctor slots:', err);
+
+        if (doc.consultation_type === 'Offline' || doc.consultation_type === 'Both') {
+          doc.offlineSlots.push(...newSlots);
+        }
+
+        // For Diagnostic services (Home Collection and Center Visit)
+        const homeCollectionSlots = newSlots.map(slot => ({
+          ...slot,
+          type: 'Home Collection',
+        }));
+
+        const centerVisitSlots = newSlots.map(slot => ({
+          ...slot,
+          type: 'Center Visit',
+        }));
+
+        // Add slots to doctor's diagnostic collections (if applicable)
+        doc.homeCollectionSlots.push(...homeCollectionSlots);
+        doc.centerVisitSlots.push(...centerVisitSlots);
+
+        // Save the updated slots in the database
+        await doc.save();
+        console.log(`✅ Slots generated for Dr. ${doc.name} for ${startTime.format('dddd, MMMM Do YYYY')}`);
       }
-    } else {
-      console.log(`⏳ Not Sunday, so no new slots generated today!`);
     }
-  }, 86400000);  // Check every day (86400000 ms) to see if it's Sunday
+  } catch (err) {
+    console.error('❌ Error generating weekly slots:', err);
+  }
 };
 
-// Start the weekly cron job
-weeklySlotCronJob();
+// ✅ Run the slot generation function every Sunday at 5 AM
+const scheduleWeeklySlotGeneration = () => {
+  const now = moment();
+  let nextSunday = moment().day(7).hour(5).minute(0).second(0); // Next Sunday at 5 AM
 
+  // If it's already past Sunday 5 AM, schedule for the next Sunday
+  if (now.isAfter(nextSunday)) {
+    nextSunday = nextSunday.add(1, 'weeks');
+  }
 
-// ✅ Countdown function to show remaining days until Sunday slot generation
-const showCountdown = () => {
-  const nextSunday = getNextSunday();
-  const daysLeft = nextSunday.diff(moment(), 'days');
-  console.log(`⏳ ${daysLeft} days left until new doctor slots are generated on Sunday!`);
+  // Calculate the delay in milliseconds to the next Sunday at 5 AM
+  const delay = nextSunday.diff(now);
+
+  // Schedule the slot generation function to run at 5 AM on Sunday every week
+  setTimeout(() => {
+    console.log('🌟 Generating slots for the upcoming week...');
+    generateWeeklySlotsForDoctorsAndDiagnostics();
+
+    // After the first run, repeat weekly at 5 AM on Sundays
+    setInterval(() => {
+      console.log('🌟 Generating slots for the upcoming week...');
+      generateWeeklySlotsForDoctorsAndDiagnostics();
+    }, 7 * 24 * 60 * 60 * 1000); // Repeat weekly (7 days)
+  }, delay);
 };
 
-// Check remaining days until next Sunday (for testing)
-showCountdown();
-
+// Start scheduling weekly generation
+scheduleWeeklySlotGeneration();
 
 
 // ✅ Create Doctor Controller
@@ -1737,7 +2466,7 @@ export const getAllDiagnosticBookingsForAdmin = async (req, res) => {
     })
       .populate({
         path: 'staffId',
-        select: 'name'
+        select: 'name employeeId' // ✅ employeeId added here
       })
       .populate({
         path: 'diagnosticId',
@@ -1756,12 +2485,13 @@ export const getAllDiagnosticBookingsForAdmin = async (req, res) => {
       appointmentId: booking._id,
       diagnosticBookingId: booking.diagnosticBookingId || null,
       packageId: booking.packageId || null,
-      diagnosticId: booking.diagnosticId?._id || null, // ✅ Show the diagnostic center ID
+      diagnosticId: booking.diagnosticId?._id || null,
       diagnostic_name: booking.diagnosticId?.name || '',
       diagnostic_image: booking.diagnosticId?.image || '',
       diagnostic_address: booking.diagnosticId?.address || '',
       staffId: booking.staffId || '',
       staff_name: booking.staffId?.name || '',
+      staff_employeeId: booking.staffId?.employeeId || null, // ✅ employeeId added here
       family_member: {
         name: booking.familyMemberId?.name || '',
         age: booking.familyMemberId?.age || '',
@@ -1792,7 +2522,6 @@ export const getAllDiagnosticBookingsForAdmin = async (req, res) => {
     });
   }
 };
-
 
 
 export const getDiagnosticBookingsByDiagnosticId = async (req, res) => {
@@ -1873,7 +2602,7 @@ export const getSingleDiagnosticBooking = async (req, res) => {
       .populate("familyMemberId", "name relation age gender")
       .populate("cartId")
       .populate("packageId", "name price description totalTestsIncluded")
-      .populate("staffId", "name email contact_number")
+      .populate("staffId", "name email contact_number employeeId") // ✅ employeeId add किया
       .lean();
 
     if (!booking) {
@@ -1960,6 +2689,7 @@ export const getSingleDiagnosticBooking = async (req, res) => {
           name: booking.staffId.name,
           email: booking.staffId.email,
           contact_number: booking.staffId.contact_number,
+          employeeId: booking.staffId.employeeId || "N/A", // ✅ employeeId added here
         }
         : null,
 
@@ -1985,7 +2715,6 @@ export const getSingleDiagnosticBooking = async (req, res) => {
     });
   }
 };
-
 
 
 // Controller to get bookings for a specific diagnostic center
@@ -2094,7 +2823,7 @@ export const getAllDoctorAppointments = async (req, res) => {
       })
       .populate({
         path: 'staffId',
-        select: 'name'
+        select: 'name employeeId' // ✅ employeeId add किया
       })
       .select('doctorId staffId familyMemberId bookedSlot totalPrice status meetingLink type discount payableAmount createdAt doctorConsultationBookingId')
       .sort({ createdAt: -1 });
@@ -2111,6 +2840,7 @@ export const getAllDoctorAppointments = async (req, res) => {
         doctor_image: booking.doctorId?.image,
         staffId: booking.staffId,
         staff_name: booking.staffId?.name,
+        staff_employeeId: booking.staffId?.employeeId || null, // ✅ employeeId added here
         appointment_date: booking.bookedSlot?.date,
         time_slot: booking.bookedSlot?.timeSlot,
         status: booking.status,
@@ -2131,7 +2861,6 @@ export const getAllDoctorAppointments = async (req, res) => {
     });
   }
 };
-
 
 
 
@@ -2407,7 +3136,7 @@ export const getSingleDoctorAppointment = async (req, res) => {
       })
       .populate({
         path: 'staffId',
-        select: 'name',
+        select: 'name employeeId', // ✅ employeeId add किया
       })
       .select(
         'doctorId doctorConsultationBookingId staffId familyMemberId bookedSlot totalPrice status meetingLink type discount payableAmount createdAt doctorReports doctorPrescriptions receivedDoctorReports receivedDoctorPrescriptions transactionId paymentStatus'
@@ -2425,6 +3154,7 @@ export const getSingleDoctorAppointment = async (req, res) => {
         doctor_specialization: booking.doctorId?.specialization,
         doctor_image: booking.doctorId?.image,
         staff_name: booking.staffId?.name,
+        staff_employeeId: booking.staffId?.employeeId || null, // ✅ employeeId added here
         appointment_date: booking.bookedSlot?.date,
         time_slot: booking.bookedSlot?.timeSlot,
         status: booking.status,
@@ -2549,6 +3279,8 @@ export const createCompany = (req, res) => {
         password,
         diagnostic,
         contactPerson,
+        branches,
+        noOfBranches, // ✅ added here (manual field)
       } = req.body;
 
       // ✅ Parse and validate diagnostic IDs
@@ -2559,14 +3291,14 @@ export const createCompany = (req, res) => {
         _id: { $in: filteredDiagnosticIds },
       }).select("_id");
 
-      // ✅ Handle uploaded files with proper paths
+      // ✅ Handle uploaded files
       const imageFile = req.files?.image?.[0]?.filename
         ? `/uploads/company-images/${req.files.image[0].filename}`
         : null;
 
       const documents = req.files?.documents?.map(doc => `/uploads/documents/${doc.filename}`) || [];
 
-      // ✅ Parse and format contact persons
+      // ✅ Parse contact persons
       const parsedContactPersons = typeof contactPerson === "string" ? JSON.parse(contactPerson) : contactPerson;
 
       const formattedContactPersons = Array.isArray(parsedContactPersons)
@@ -2583,6 +3315,34 @@ export const createCompany = (req, res) => {
             pincode: person?.address?.pincode,
             street: person?.address?.street || "Not Provided",
           },
+        }))
+        : [];
+
+      // ✅ Parse branches
+      const parsedBranches = typeof branches === "string" ? JSON.parse(branches) : branches;
+
+      const formattedBranches = Array.isArray(parsedBranches)
+        ? parsedBranches.map(branch => ({
+          branchName: branch?.branchName,
+          branchCode: branch?.branchCode,
+          email: branch?.email,
+          phone: branch?.phone,
+          branchHead: branch?.branchHead,
+          country: branch?.country,
+          state: branch?.state,
+          city: branch?.city,
+          pincode: branch?.pincode,
+          address: branch?.address,
+          contactPerson: {
+            name: branch?.contactPerson?.name,
+            designation: branch?.contactPerson?.designation,
+            email: branch?.contactPerson?.email,
+            phone: branch?.contactPerson?.phone,
+            gender: branch?.contactPerson?.gender,
+          },
+          status: 'active',
+          createdAt: new Date(),
+          updatedAt: new Date(),
         }))
         : [];
 
@@ -2608,6 +3368,8 @@ export const createCompany = (req, res) => {
         image: imageFile,
         documents,
         contactPerson: formattedContactPersons,
+        branches: formattedBranches,
+        noOfBranches: Number(noOfBranches) || 0, // ✅ manually entered field
       });
 
       const savedCompany = await newCompany.save();
@@ -2618,11 +3380,21 @@ export const createCompany = (req, res) => {
       });
     } catch (error) {
       console.error("Error creating company:", error);
-      res.status(500).json({ message: "Server error", error: error.message });
+
+      if (error.code === 11000) {
+        const field = Object.keys(error.keyPattern)[0];
+        return res.status(400).json({
+          message: `${field} already exists`,
+        });
+      }
+
+      res.status(500).json({
+        message: "Server error",
+        error: error.message,
+      });
     }
   });
 };
-
 
 export const uploadCompaniesFromCSV = async (req, res) => {
   try {
@@ -2771,27 +3543,87 @@ export const updateCompany = (req, res) => {
         city,
         pincode,
         contactPerson,
+        branches,
         password,
-        diagnostic,  // Array of diagnostic _ids
+        diagnostic,
+        noOfBranches
       } = req.body;
 
       // 🔍 Parse diagnostic array from frontend if sent as stringified JSON
       const diagnosticIds = typeof diagnostic === 'string' ? JSON.parse(diagnostic) : diagnostic;
+      const filteredDiagnosticIds = (diagnosticIds || []).filter(id => mongoose.Types.ObjectId.isValid(id));
 
       // Check if all diagnostic _ids are valid
-      const validDiagnostics = diagnosticIds
-        ? await Diagnostic.find({ '_id': { $in: diagnosticIds } }).select('_id')
+      const validDiagnostics = filteredDiagnosticIds.length > 0
+        ? await Diagnostic.find({ '_id': { $in: filteredDiagnosticIds } }).select('_id')
         : [];
 
       // 📂 Handle uploaded files (image and documents)
-      const imageFile = req.files?.image?.[0]?.path || '';
-      const documents = req.files?.documents?.map(doc => doc.path) || [];
+      const imageFile = req.files?.image?.[0]?.filename
+        ? `/uploads/company-images/${req.files.image[0].filename}`
+        : null;
+
+      const documents = req.files?.documents?.map(doc => `/uploads/documents/${doc.filename}`) || [];
 
       // 🔄 Parse the contactPerson if sent as stringified JSON
-      const parsedContactPerson = typeof contactPerson === 'string' ? JSON.parse(contactPerson) : contactPerson;
+      const parsedContactPersons = typeof contactPerson === 'string' ? JSON.parse(contactPerson) : contactPerson;
+
+      const formattedContactPersons = Array.isArray(parsedContactPersons)
+        ? parsedContactPersons.map(person => ({
+          name: person?.name,
+          designation: person?.designation,
+          gender: person?.gender,
+          email: person?.email,
+          phone: person?.phone,
+          address: {
+            country: person?.address?.country,
+            state: person?.address?.state,
+            city: person?.address?.city,
+            pincode: person?.address?.pincode,
+            street: person?.address?.street || "Not Provided",
+          },
+        }))
+        : [];
+
+      // 🔄 Parse and format branches - IMPROVED VERSION
+      const parsedBranches = typeof branches === 'string' ? JSON.parse(branches) : branches;
+
+      const formattedBranches = Array.isArray(parsedBranches)
+        ? parsedBranches.map(branch => {
+          // For new branches (without _id), generate new ObjectId
+          // For existing branches, keep the same _id
+          const branchId = branch?._id ? branch._id : new mongoose.Types.ObjectId();
+          
+          return {
+            _id: branchId,
+            branchName: branch?.branchName,
+            branchCode: branch?.branchCode,
+            email: branch?.email,
+            phone: branch?.phone,
+            branchHead: branch?.branchHead,
+            country: branch?.country,
+            state: branch?.state,
+            city: branch?.city,
+            pincode: branch?.pincode,
+            address: branch?.address,
+            contactPerson: {
+              name: branch?.contactPerson?.name,
+              designation: branch?.contactPerson?.designation,
+              email: branch?.contactPerson?.email,
+              phone: branch?.contactPerson?.phone,
+              gender: branch?.contactPerson?.gender,
+            },
+            status: branch?.status || 'active',
+            createdAt: branch?.createdAt || new Date(),
+            updatedAt: new Date(),
+          };
+        })
+        : [];
 
       // Prepare the updated company data
-      const updateData = {};
+      const updateData = {
+        updatedAt: new Date()
+      };
 
       // Only include the fields that are provided in the request
       if (name) updateData.name = name;
@@ -2803,50 +3635,104 @@ export const updateCompany = (req, res) => {
       if (insuranceBroker) updateData.insuranceBroker = insuranceBroker;
       if (email) updateData.email = email;
       if (phone) updateData.phone = phone;
-      if (gstNumber) updateData.gstNumber = gstNumber;
+      if (gstNumber !== undefined) updateData.gstNumber = gstNumber;
       if (companyStrength) updateData.companyStrength = companyStrength;
       if (country) updateData.country = country;
       if (state) updateData.state = state;
       if (city) updateData.city = city;
       if (pincode) updateData.pincode = pincode;
-      if (password) updateData.password = password;  // Store password directly
+      if (password) updateData.password = password;
+      if (noOfBranches !== undefined) updateData.noOfBranches = Number(noOfBranches); // ✅ Added
 
-      if (validDiagnostics.length > 0) updateData.diagnostics = validDiagnostics.map(d => d._id);  // Store the array of diagnostic _ids
-      if (imageFile) updateData.image = imageFile;  // Update the uploaded image path
-      if (documents.length > 0) updateData.documents = documents;  // Update the uploaded document paths
-
-      if (parsedContactPerson) {
-        updateData.contactPerson = {
-          name: parsedContactPerson?.name,
-          designation: parsedContactPerson?.designation,
-          gender: parsedContactPerson?.gender,
-          email: parsedContactPerson?.email,
-          phone: parsedContactPerson?.phone,
-          address: {
-            country: parsedContactPerson?.address?.country,
-            state: parsedContactPerson?.address?.state,
-            city: parsedContactPerson?.address?.city,
-            pincode: parsedContactPerson?.address?.pincode,
-            street: parsedContactPerson?.address?.street || 'Not Provided',  // Default if not provided
-          },
-        };
+      // Update arrays and nested objects
+      if (validDiagnostics.length > 0) updateData.diagnostics = validDiagnostics.map(d => d._id);
+      
+      // Handle image update - only update if new image is uploaded
+      if (imageFile) {
+        updateData.image = imageFile;
+      }
+      
+      // Handle documents - append new documents to existing ones
+      if (documents.length > 0) {
+        // Get current company to preserve existing documents
+        const currentCompany = await Company.findById(companyId).select('documents');
+        const existingDocuments = currentCompany?.documents || [];
+        updateData.documents = [...existingDocuments, ...documents];
       }
 
+      // Update contact persons if provided
+      if (formattedContactPersons.length > 0) {
+        updateData.contactPerson = formattedContactPersons;
+      }
+
+      // Update branches if provided - COMPLETE REPLACEMENT
+      if (formattedBranches.length > 0) {
+        updateData.branches = formattedBranches;
+      }
+
+      console.log('Updating company with data:', {
+        basicFields: Object.keys(updateData).filter(key => key !== 'branches' && key !== 'contactPerson'),
+        branchesCount: formattedBranches.length,
+        contactPersonsCount: formattedContactPersons.length
+      });
+
       // Find the company by ID and update it
-      const updatedCompany = await Company.findByIdAndUpdate(companyId, updateData, { new: true });
+      const updatedCompany = await Company.findByIdAndUpdate(
+        companyId, 
+        { $set: updateData }, // Use $set to properly update nested arrays
+        { 
+          new: true, // Return updated document
+          runValidators: true // Run model validations
+        }
+      );
 
       if (!updatedCompany) {
         return res.status(404).json({ message: 'Company not found' });
       }
 
+      // Populate the diagnostics and other references if needed
+      await updatedCompany.populate('diagnostics');
+      await updatedCompany.populate('staff');
+
       // Respond with success message and the updated company details
       res.status(200).json({
         message: 'Company updated successfully!',
         company: updatedCompany,
+        updatedBranches: formattedBranches.length,
+        updatedContactPersons: formattedContactPersons.length
       });
     } catch (error) {
       console.error('Error updating company:', error);
-      res.status(500).json({ message: 'Server error', error });
+      
+      // Handle duplicate key errors
+      if (error.code === 11000) {
+        const field = Object.keys(error.keyPattern)[0];
+        return res.status(400).json({ 
+          message: `${field} already exists`, 
+          field: field
+        });
+      }
+      
+      // Handle validation errors
+      if (error.name === 'ValidationError') {
+        const errors = Object.values(error.errors).map(err => err.message);
+        return res.status(400).json({ 
+          message: "Validation failed", 
+          errors 
+        });
+      }
+      
+      // Handle CastError (invalid ID)
+      if (error.name === 'CastError') {
+        return res.status(400).json({ 
+          message: "Invalid company ID" 
+        });
+      }
+      
+      res.status(500).json({ 
+        message: 'Server error', 
+        error: error.message 
+      });
     }
   });
 };
@@ -2857,13 +3743,169 @@ export const updateCompany = (req, res) => {
 export const getCompanies = async (req, res) => {
   try {
     const companies = await Company.find().sort({ createdAt: -1 });
+
+    // Sabhi companies ke liye statistics calculate karna
+    const companiesWithStats = await Promise.all(
+      companies.map(async (company) => {
+        // Company ke saare staff IDs collect karo
+        const companyStaffIds = company.staff.map(staff => staff._id);
+
+        // Diagnostic statistics collect karo
+        const diagnosticsStats = {};
+        let totalTests = 0;
+        let totalPackages = 0;
+        let totalScans = 0;
+        let totalStaffWithAssignments = 0;
+        const assignedStaffSet = new Set();
+
+        // Staff ke assigned items process karo
+        const staffs = await Staff.find({ 
+          _id: { $in: companyStaffIds } 
+        }).select('myTests myPackages myScans name email employeeId');
+
+        staffs.forEach(staff => {
+          // Tests
+          staff.myTests.forEach(test => {
+            if (test.diagnosticId) {
+              const diagId = test.diagnosticId.toString();
+              if (!diagnosticsStats[diagId]) {
+                diagnosticsStats[diagId] = {
+                  diagnosticId: diagId,
+                  tests: 0,
+                  packages: 0,
+                  scans: 0,
+                  staffIds: new Set()
+                };
+              }
+              diagnosticsStats[diagId].tests++;
+              diagnosticsStats[diagId].staffIds.add(staff._id.toString());
+              assignedStaffSet.add(staff._id.toString());
+              totalTests++;
+            }
+          });
+
+          // Packages
+          staff.myPackages.forEach(pkg => {
+            if (pkg.diagnosticId) {
+              const diagId = pkg.diagnosticId.toString();
+              if (!diagnosticsStats[diagId]) {
+                diagnosticsStats[diagId] = {
+                  diagnosticId: diagId,
+                  tests: 0,
+                  packages: 0,
+                  scans: 0,
+                  staffIds: new Set()
+                };
+              }
+              diagnosticsStats[diagId].packages++;
+              diagnosticsStats[diagId].staffIds.add(staff._id.toString());
+              assignedStaffSet.add(staff._id.toString());
+              totalPackages++;
+            }
+          });
+
+          // Scans
+          staff.myScans.forEach(scan => {
+            if (scan.diagnosticId) {
+              const diagId = scan.diagnosticId.toString();
+              if (!diagnosticsStats[diagId]) {
+                diagnosticsStats[diagId] = {
+                  diagnosticId: diagId,
+                  tests: 0,
+                  packages: 0,
+                  scans: 0,
+                  staffIds: new Set()
+                };
+              }
+              diagnosticsStats[diagId].scans++;
+              diagnosticsStats[diagId].staffIds.add(staff._id.toString());
+              assignedStaffSet.add(staff._id.toString());
+              totalScans++;
+            }
+          });
+        });
+
+        // Diagnostic details fetch karo
+        const diagnosticIds = Object.keys(diagnosticsStats);
+        const diagnostics = await Diagnostic.find({ 
+          _id: { $in: diagnosticIds } 
+        }).select('name email phone address city centerType');
+
+        // Diagnostic data map karo
+        const diagnosticData = diagnostics.map(diagnostic => {
+          const stats = diagnosticsStats[diagnostic._id.toString()] || {
+            tests: 0,
+            packages: 0,
+            scans: 0,
+            staffIds: new Set()
+          };
+
+          return {
+            _id: diagnostic._id,
+            name: diagnostic.name,
+            email: diagnostic.email,
+            phone: diagnostic.phone,
+            address: diagnostic.address,
+            city: diagnostic.city,
+            centerType: diagnostic.centerType,
+            statistics: {
+              tests: stats.tests,
+              packages: stats.packages,
+              scans: stats.scans,
+              totalItems: stats.tests + stats.packages + stats.scans,
+              staffAssigned: stats.staffIds.size
+            }
+          };
+        });
+
+        // Company ke totals calculate karo
+        const companyTotals = {
+          totalStaff: company.staff.length,
+          totalTests,
+          totalPackages,
+          totalScans,
+          totalItems: totalTests + totalPackages + totalScans,
+          totalDiagnostics: diagnosticData.length,
+          staffWithAssignments: assignedStaffSet.size,
+          assignmentPercentage: company.staff.length > 0 
+            ? ((assignedStaffSet.size / company.staff.length) * 100).toFixed(2) 
+            : 0
+        };
+
+        return {
+          ...company.toObject(),
+          statistics: companyTotals,
+          diagnostics: diagnosticData,
+          staffSummary: {
+            total: company.staff.length,
+            withAssignments: assignedStaffSet.size,
+            withoutAssignments: company.staff.length - assignedStaffSet.size
+          }
+        };
+      })
+    );
+
     res.status(200).json({
-      message: 'Companies fetched successfully',
-      companies,
+      message: 'Companies fetched successfully with statistics',
+      companies: companiesWithStats,
+      timestamp: new Date(),
+      totalCompanies: companiesWithStats.length,
+      globalStats: {
+        totalCompanies: companiesWithStats.length,
+        totalStaff: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalStaff, 0),
+        totalTests: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalTests, 0),
+        totalPackages: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalPackages, 0),
+        totalScans: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalScans, 0),
+        totalDiagnostics: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalDiagnostics, 0)
+      }
     });
+
   } catch (error) {
-    console.error('Error fetching companies:', error);
-    res.status(500).json({ message: 'Server error', error });
+    console.error('Error fetching companies with stats:', error);
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 };
 
@@ -2872,31 +3914,497 @@ export const getCompanyById = async (req, res) => {
   try {
     const { companyId } = req.params;
 
-    const company = await Company.findById(companyId)
-      .populate({
-        path: 'diagnostics',
-        populate: [
-          { path: 'tests', model: 'Test' },
-          { path: 'packages', model: 'Package' },
-          { path: 'scans', model: 'Xray' },
-        ]
-      });
-
+    // पहले company को base details के साथ fetch करें
+    const company = await Company.findById(companyId);
+    
     if (!company) {
       return res.status(404).json({ message: 'Company not found' });
     }
 
+    // Company ke saare staff IDs collect karo
+    const companyStaffIds = company.staff.map(staff => staff._id);
+
+    // Diagnostic statistics collect karo - MODIFIED
+    const diagnosticsStats = {};
+    const uniqueTestAssignments = new Map(); // Test ID -> Test details with assigned staff array
+    const uniquePackageAssignments = new Map(); // Package ID -> Package details with assigned staff array
+    const uniqueScanAssignments = new Map(); // Scan ID -> Scan details with assigned staff array
+
+    // Staff details fetch karo
+    const staffs = await Staff.find({ 
+      _id: { $in: companyStaffIds } 
+    }).select('myTests myPackages myScans name email employeeId gender age');
+
+    // Staff details ke liye map create karo
+    const staffDetailsMap = new Map();
+    staffs.forEach(staff => {
+      staffDetailsMap.set(staff._id.toString(), {
+        _id: staff._id,
+        name: staff.name,
+        employeeId: staff.employeeId,
+        gender: staff.gender || 'Other',
+        age: staff.age || 0
+      });
+    });
+
+    // Process tests - MODIFIED
+    staffs.forEach(staff => {
+      const staffDetail = staffDetailsMap.get(staff._id.toString());
+
+      // Tests with details - GROUP BY TEST ID
+      staff.myTests.forEach(test => {
+        if (test.diagnosticId && test.testId) {
+          const diagId = test.diagnosticId.toString();
+          const testId = test.testId.toString();
+          
+          if (!diagnosticsStats[diagId]) {
+            diagnosticsStats[diagId] = {
+              diagnosticId: diagId,
+              uniqueTests: new Map(), // Use Map for unique tests
+              uniquePackages: new Map(), // Use Map for unique packages
+              uniqueScans: new Map(), // Use Map for unique scans
+              staffIds: new Set()
+            };
+          }
+          
+          // Age group determine karo
+          const age = staffDetail.age || 0;
+          let ageGroup = 'Unknown';
+          if (age >= 18 && age <= 25) ageGroup = '18-25';
+          else if (age >= 26 && age <= 35) ageGroup = '26-35';
+          else if (age >= 36 && age <= 45) ageGroup = '36-45';
+          else if (age >= 46 && age <= 55) ageGroup = '46-55';
+          else if (age > 55) ageGroup = '56+';
+          
+          // Staff assignment details
+          const staffAssignment = {
+            _id: staff._id,
+            name: staff.name,
+            employeeId: staff.employeeId,
+            gender: staffDetail.gender,
+            age: staffDetail.age,
+            ageGroup: ageGroup
+          };
+          
+          // Check if test already exists in uniqueTests Map
+          if (!diagnosticsStats[diagId].uniqueTests.has(testId)) {
+            // Create new test entry
+            diagnosticsStats[diagId].uniqueTests.set(testId, {
+              _id: test._id,
+              testId: test.testId,
+              testName: test.testName,
+              price: test.price,
+              fastingRequired: test.fastingRequired,
+              homeCollectionAvailable: test.homeCollectionAvailable,
+              reportIn24Hrs: test.reportIn24Hrs,
+              description: test.description,
+              instruction: test.instruction,
+              precaution: test.precaution,
+              subTests: test.subTests || [],
+              assignedStaff: [staffAssignment] // Array of assigned staff
+            });
+          } else {
+            // Add staff to existing test's assignedStaff array
+            const existingTest = diagnosticsStats[diagId].uniqueTests.get(testId);
+            existingTest.assignedStaff.push(staffAssignment);
+          }
+          
+          diagnosticsStats[diagId].staffIds.add(staff._id.toString());
+        }
+      });
+
+      // Packages with details - GROUP BY PACKAGE ID
+      staff.myPackages.forEach(pkg => {
+        if (pkg.diagnosticId && pkg.packageId) {
+          const diagId = pkg.diagnosticId.toString();
+          const packageId = pkg.packageId.toString();
+          
+          if (!diagnosticsStats[diagId]) {
+            diagnosticsStats[diagId] = {
+              diagnosticId: diagId,
+              uniqueTests: new Map(),
+              uniquePackages: new Map(),
+              uniqueScans: new Map(),
+              staffIds: new Set()
+            };
+          }
+          
+          // Age group determine karo
+          const age = staffDetail.age || 0;
+          let ageGroup = 'Unknown';
+          if (age >= 18 && age <= 25) ageGroup = '18-25';
+          else if (age >= 26 && age <= 35) ageGroup = '26-35';
+          else if (age >= 36 && age <= 45) ageGroup = '36-45';
+          else if (age >= 46 && age <= 55) ageGroup = '46-55';
+          else if (age > 55) ageGroup = '56+';
+          
+          // Staff assignment details
+          const staffAssignment = {
+            _id: staff._id,
+            name: staff.name,
+            employeeId: staff.employeeId,
+            gender: staffDetail.gender,
+            age: staffDetail.age,
+            ageGroup: ageGroup
+          };
+          
+          // Check if package already exists in uniquePackages Map
+          if (!diagnosticsStats[diagId].uniquePackages.has(packageId)) {
+            // Create new package entry
+            diagnosticsStats[diagId].uniquePackages.set(packageId, {
+              _id: pkg._id,
+              packageId: pkg.packageId,
+              packageName: pkg.packageName,
+              price: pkg.price,
+              offerPrice: pkg.offerPrice,
+              totalTestsIncluded: pkg.totalTestsIncluded,
+              description: pkg.description,
+              precautions: pkg.precautions,
+              includedTests: pkg.includedTests || [],
+              assignedStaff: [staffAssignment] // Array of assigned staff
+            });
+          } else {
+            // Add staff to existing package's assignedStaff array
+            const existingPackage = diagnosticsStats[diagId].uniquePackages.get(packageId);
+            existingPackage.assignedStaff.push(staffAssignment);
+          }
+          
+          diagnosticsStats[diagId].staffIds.add(staff._id.toString());
+        }
+      });
+
+      // Scans with details - GROUP BY SCAN ID
+      staff.myScans.forEach(scan => {
+        if (scan.diagnosticId && scan.scanId) {
+          const diagId = scan.diagnosticId.toString();
+          const scanId = scan.scanId.toString();
+          
+          if (!diagnosticsStats[diagId]) {
+            diagnosticsStats[diagId] = {
+              diagnosticId: diagId,
+              uniqueTests: new Map(),
+              uniquePackages: new Map(),
+              uniqueScans: new Map(),
+              staffIds: new Set()
+            };
+          }
+          
+          // Age group determine karo
+          const age = staffDetail.age || 0;
+          let ageGroup = 'Unknown';
+          if (age >= 18 && age <= 25) ageGroup = '18-25';
+          else if (age >= 26 && age <= 35) ageGroup = '26-35';
+          else if (age >= 36 && age <= 45) ageGroup = '36-45';
+          else if (age >= 46 && age <= 55) ageGroup = '46-55';
+          else if (age > 55) ageGroup = '56+';
+          
+          // Staff assignment details
+          const staffAssignment = {
+            _id: staff._id,
+            name: staff.name,
+            employeeId: staff.employeeId,
+            gender: staffDetail.gender,
+            age: staffDetail.age,
+            ageGroup: ageGroup
+          };
+          
+          // Check if scan already exists in uniqueScans Map
+          if (!diagnosticsStats[diagId].uniqueScans.has(scanId)) {
+            // Create new scan entry
+            diagnosticsStats[diagId].uniqueScans.set(scanId, {
+              _id: scan._id,
+              scanId: scan.scanId,
+              title: scan.title,
+              price: scan.price,
+              preparation: scan.preparation,
+              reportTime: scan.reportTime,
+              image: scan.image,
+              assignedStaff: [staffAssignment] // Array of assigned staff
+            });
+          } else {
+            // Add staff to existing scan's assignedStaff array
+            const existingScan = diagnosticsStats[diagId].uniqueScans.get(scanId);
+            existingScan.assignedStaff.push(staffAssignment);
+          }
+          
+          diagnosticsStats[diagId].staffIds.add(staff._id.toString());
+        }
+      });
+    });
+
+    // Diagnostic details fetch karo
+    const diagnosticIds = Object.keys(diagnosticsStats);
+    const diagnostics = await Diagnostic.find({ 
+      _id: { $in: diagnosticIds } 
+    }).select('name email phone address city centerType');
+
+    // Collect unique test, package, and scan IDs for fetching details
+    const allTestIds = new Set();
+    const allPackageIds = new Set();
+    const allScanIds = new Set();
+
+    Object.values(diagnosticsStats).forEach(stats => {
+      // Get test IDs from Map keys
+      Array.from(stats.uniqueTests.keys()).forEach(testId => {
+        allTestIds.add(testId);
+      });
+      
+      // Get package IDs from Map keys
+      Array.from(stats.uniquePackages.keys()).forEach(packageId => {
+        allPackageIds.add(packageId);
+      });
+      
+      // Get scan IDs from Map keys
+      Array.from(stats.uniqueScans.keys()).forEach(scanId => {
+        allScanIds.add(scanId);
+      });
+    });
+
+    // Parallel queries for better performance
+    const [testsDetails, packagesDetails, scansDetails] = await Promise.all([
+      Test.find({ _id: { $in: Array.from(allTestIds) } }).select('name price description instruction precaution fastingRequired homeCollectionAvailable reportIn24Hrs gender'),
+      Package.find({ _id: { $in: Array.from(allPackageIds) } }).select('name price description precautions includedTests totalTestsIncluded gender'),
+      Xray.find({ _id: { $in: Array.from(allScanIds) } }).select('title price preparation reportTime image gender')
+    ]);
+
+    // Create lookup maps
+    const testsMap = new Map(testsDetails.map(test => [test._id.toString(), test]));
+    const packagesMap = new Map(packagesDetails.map(pkg => [pkg._id.toString(), pkg]));
+    const scansMap = new Map(scansDetails.map(scan => [scan._id.toString(), scan]));
+
+    // Diagnostic data map karo with full details
+    const diagnosticData = diagnostics.map(diagnostic => {
+      const stats = diagnosticsStats[diagnostic._id.toString()] || {
+        uniqueTests: new Map(),
+        uniquePackages: new Map(),
+        uniqueScans: new Map(),
+        staffIds: new Set()
+      };
+
+      // Convert Maps to Arrays for response
+      const uniqueTestsArray = Array.from(stats.uniqueTests.values());
+      const uniquePackagesArray = Array.from(stats.uniquePackages.values());
+      const uniqueScansArray = Array.from(stats.uniqueScans.values());
+
+      // Enrich test details
+      const enrichedTests = uniqueTestsArray.map(test => {
+        const testDetails = testsMap.get(test.testId?.toString());
+        return {
+          ...test,
+          testDetails: testDetails || null
+        };
+      });
+
+      // Enrich package details
+      const enrichedPackages = uniquePackagesArray.map(pkg => {
+        const packageDetails = packagesMap.get(pkg.packageId?.toString());
+        return {
+          ...pkg,
+          packageDetails: packageDetails || null
+        };
+      });
+
+      // Enrich scan details
+      const enrichedScans = uniqueScansArray.map(scan => {
+        const scanDetails = scansMap.get(scan.scanId?.toString());
+        return {
+          ...scan,
+          scanDetails: scanDetails || null
+        };
+      });
+
+      // Calculate gender and age group distribution
+      const testGenderDistribution = {};
+      const testAgeGroupDistribution = {};
+      
+      const packageGenderDistribution = {};
+      const packageAgeGroupDistribution = {};
+      
+      const scanGenderDistribution = {};
+      const scanAgeGroupDistribution = {};
+
+      // Tests ka distribution calculate karo - now from assignedStaff array
+      enrichedTests.forEach(test => {
+        test.assignedStaff?.forEach(staff => {
+          const gender = staff?.gender || 'Unknown';
+          const ageGroup = staff?.ageGroup || 'Unknown';
+          
+          // Gender distribution
+          if (!testGenderDistribution[gender]) {
+            testGenderDistribution[gender] = 0;
+          }
+          testGenderDistribution[gender]++;
+          
+          // Age group distribution
+          if (!testAgeGroupDistribution[ageGroup]) {
+            testAgeGroupDistribution[ageGroup] = 0;
+          }
+          testAgeGroupDistribution[ageGroup]++;
+        });
+      });
+
+      // Packages ka distribution calculate karo
+      enrichedPackages.forEach(pkg => {
+        pkg.assignedStaff?.forEach(staff => {
+          const gender = staff?.gender || 'Unknown';
+          const ageGroup = staff?.ageGroup || 'Unknown';
+          
+          // Gender distribution
+          if (!packageGenderDistribution[gender]) {
+            packageGenderDistribution[gender] = 0;
+          }
+          packageGenderDistribution[gender]++;
+          
+          // Age group distribution
+          if (!packageAgeGroupDistribution[ageGroup]) {
+            packageAgeGroupDistribution[ageGroup] = 0;
+          }
+          packageAgeGroupDistribution[ageGroup]++;
+        });
+      });
+
+      // Scans ka distribution calculate karo
+      enrichedScans.forEach(scan => {
+        scan.assignedStaff?.forEach(staff => {
+          const gender = staff?.gender || 'Unknown';
+          const ageGroup = staff?.ageGroup || 'Unknown';
+          
+          // Gender distribution
+          if (!scanGenderDistribution[gender]) {
+            scanGenderDistribution[gender] = 0;
+          }
+          scanGenderDistribution[gender]++;
+          
+          // Age group distribution
+          if (!scanAgeGroupDistribution[ageGroup]) {
+            scanAgeGroupDistribution[ageGroup] = 0;
+          }
+          scanAgeGroupDistribution[ageGroup]++;
+        });
+      });
+
+      // Calculate total assigned staff across all items
+      const allAssignedStaffIds = new Set();
+      enrichedTests.forEach(test => {
+        test.assignedStaff?.forEach(staff => {
+          allAssignedStaffIds.add(staff._id?.toString());
+        });
+      });
+      enrichedPackages.forEach(pkg => {
+        pkg.assignedStaff?.forEach(staff => {
+          allAssignedStaffIds.add(staff._id?.toString());
+        });
+      });
+      enrichedScans.forEach(scan => {
+        scan.assignedStaff?.forEach(staff => {
+          allAssignedStaffIds.add(staff._id?.toString());
+        });
+      });
+
+      return {
+        _id: diagnostic._id,
+        name: diagnostic.name,
+        email: diagnostic.email,
+        phone: diagnostic.phone,
+        address: diagnostic.address,
+        city: diagnostic.city,
+        centerType: diagnostic.centerType,
+        statistics: {
+          uniqueTests: enrichedTests.length,
+          uniquePackages: enrichedPackages.length,
+          uniqueScans: enrichedScans.length,
+          totalAssignedStaff: allAssignedStaffIds.size,
+          testDistribution: {
+            gender: testGenderDistribution,
+            ageGroup: testAgeGroupDistribution,
+            totalAssignments: Object.values(testGenderDistribution).reduce((a, b) => a + b, 0)
+          },
+          packageDistribution: {
+            gender: packageGenderDistribution,
+            ageGroup: packageAgeGroupDistribution,
+            totalAssignments: Object.values(packageGenderDistribution).reduce((a, b) => a + b, 0)
+          },
+          scanDistribution: {
+            gender: scanGenderDistribution,
+            ageGroup: scanAgeGroupDistribution,
+            totalAssignments: Object.values(scanGenderDistribution).reduce((a, b) => a + b, 0)
+          }
+        },
+        tests: enrichedTests, // Now this will have unique tests with assignedStaff array
+        packages: enrichedPackages, // Now this will have unique packages with assignedStaff array
+        scans: enrichedScans, // Now this will have unique scans with assignedStaff array
+        assignedStaff: Array.from(stats.staffIds)
+      };
+    });
+
+    // Company ke totals calculate karo - MODIFIED for unique counts
+    const assignedStaffSet = new Set();
+    let totalTestAssignments = 0;
+    let totalPackageAssignments = 0;
+    let totalScanAssignments = 0;
+
+    diagnosticData.forEach(diag => {
+      diag.tests.forEach(test => {
+        test.assignedStaff?.forEach(staff => {
+          assignedStaffSet.add(staff._id?.toString());
+          totalTestAssignments++;
+        });
+      });
+      diag.packages.forEach(pkg => {
+        pkg.assignedStaff?.forEach(staff => {
+          assignedStaffSet.add(staff._id?.toString());
+          totalPackageAssignments++;
+        });
+      });
+      diag.scans.forEach(scan => {
+        scan.assignedStaff?.forEach(staff => {
+          assignedStaffSet.add(staff._id?.toString());
+          totalScanAssignments++;
+        });
+      });
+    });
+
+    const companyTotals = {
+      totalStaff: company.staff.length,
+      uniqueTests: diagnosticData.reduce((sum, diag) => sum + diag.tests.length, 0),
+      uniquePackages: diagnosticData.reduce((sum, diag) => sum + diag.packages.length, 0),
+      uniqueScans: diagnosticData.reduce((sum, diag) => sum + diag.scans.length, 0),
+      totalTestAssignments,
+      totalPackageAssignments,
+      totalScanAssignments,
+      totalDiagnostics: diagnosticData.length,
+      staffWithAssignments: assignedStaffSet.size,
+      assignmentPercentage: company.staff.length > 0 
+        ? ((assignedStaffSet.size / company.staff.length) * 100).toFixed(2) 
+        : 0
+    };
+
+    // Combine company data with diagnostics and statistics
+    const companyWithFullDetails = {
+      ...company.toObject(),
+      statistics: companyTotals,
+      diagnostics: diagnosticData,
+      staffSummary: {
+        total: company.staff.length,
+        withAssignments: assignedStaffSet.size,
+        withoutAssignments: company.staff.length - assignedStaffSet.size
+      }
+    };
+
     res.status(200).json({
-      message: 'Company fetched successfully',
-      company,
+      message: 'Company fetched successfully with complete details',
+      company: companyWithFullDetails,
+      timestamp: new Date()
     });
 
   } catch (error) {
-    console.error('Error fetching company:', error);
-    res.status(500).json({ message: 'Server error', error });
+    console.error('Error fetching company with full details:', error);
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 };
-
 
 // Delete Company Controller
 export const deleteCompany = async (req, res) => {
@@ -2947,28 +4455,56 @@ export const getCompanyWithStaff = async (req, res) => {
   try {
     const { companyId } = req.params;
 
-    const company = await Company.findById(companyId)
-      .populate({
-        path: 'staff',
-        model: 'Staff',
-        select: 'name role contact_number email dob gender age address profileImage idImage wallet_balance department' // jitne fields chahiye ho
-      });
+    // 1️⃣ Fetch company (has branches array)
+    const company = await Company.findById(companyId);
 
     if (!company) {
       return res.status(404).json({ message: "Company not found" });
     }
 
+    // 2️⃣ Extract staff IDs from company
+    const staffIds = company.staff.map(st => st._id);
+
+    // 3️⃣ Fetch staff data including employeeId
+    const staffMembers = await Staff.find({
+      _id: { $in: staffIds }
+    }).select(
+      "name role contact_number email age gender address profileImage idImage wallet_balance department branch mailSent mailSentAt employeeId termsAndConditionsAccepted termsAcceptedAt"
+    );
+
+    // 4️⃣ Map staff → find branchName in company.branches[]
+    const companyBranchesMap = {};
+    company.branches.forEach(br => {
+      companyBranchesMap[br._id.toString()] = br.branchName;
+    });
+
+    const finalStaff = staffMembers.map(staff => {
+      const branchId = staff.branch ? staff.branch.toString() : null;
+      // Find branch name
+      const branchName = branchId ? companyBranchesMap[branchId] || null : null;
+
+      return {
+        ...staff._doc,
+        branchName: branchName,  // ⭐ Add branchName
+        termsAndConditionsAccepted: staff.termsAndConditionsAccepted,  // Add terms acceptance fields
+        termsAcceptedAt: staff.termsAcceptedAt   // Add terms acceptance fields
+      };
+    });
+
+    // 5️⃣ Send response
     return res.status(200).json({
       message: "Company and staff fetched successfully",
-      company
+      company: {
+        ...company._doc,
+        staff: finalStaff
+      }
     });
 
   } catch (error) {
-    console.error("Error fetching company and staff:", error);
+    console.error("❌ Error fetching company + staff:", error);
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 
 
 // Create a new category with optional image
@@ -3687,6 +5223,93 @@ export const importCompaniesFromExcel = async (req, res) => {
     const savedCompanies = [];
 
     for (const entry of data) {
+      // Parse branches from Excel
+      let branches = [];
+      if (entry.branches) {
+        try {
+          // Try to parse as JSON string first
+          branches = typeof entry.branches === 'string' ? JSON.parse(entry.branches) : entry.branches;
+        } catch (parseError) {
+          console.warn('Failed to parse branches as JSON, trying alternative format:', parseError.message);
+          // Alternative: Parse from comma-separated branch names
+          if (typeof entry.branches === 'string') {
+            const branchNames = entry.branches.split(',').map(name => name.trim()).filter(Boolean);
+            branches = branchNames.map(branchName => ({
+              branchName: branchName,
+              branchCode: generateBranchCode(branchName), // Helper function to generate branch code
+              email: entry.email || '',
+              phone: entry.phone || '',
+              branchHead: entry.contactPerson_name || '',
+              country: entry.country || '',
+              state: entry.state || '',
+              city: entry.city || '',
+              pincode: entry.pincode || '',
+              address: `${entry.city || ''}, ${entry.state || ''}, ${entry.country || ''}`,
+              contactPerson: {
+                name: entry.contactPerson_name || '',
+                designation: entry.contactPerson_designation || '',
+                email: entry.contactPerson_email || '',
+                phone: entry.contactPerson_phone || '',
+                gender: entry.contactPerson_gender || '',
+              },
+              status: 'active',
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            }));
+          }
+        }
+      }
+
+      // If no branches provided, create a default main branch
+      if (!branches || branches.length === 0) {
+        branches = [{
+          branchName: 'Main Branch',
+          branchCode: generateBranchCode(entry.name || 'Company'),
+          email: entry.email || '',
+          phone: entry.phone || '',
+          branchHead: entry.contactPerson_name || '',
+          country: entry.country || '',
+          state: entry.state || '',
+          city: entry.city || '',
+          pincode: entry.pincode || '',
+          address: `${entry.city || ''}, ${entry.state || ''}, ${entry.country || ''}`,
+          contactPerson: {
+            name: entry.contactPerson_name || '',
+            designation: entry.contactPerson_designation || '',
+            email: entry.contactPerson_email || '',
+            phone: entry.contactPerson_phone || '',
+            gender: entry.contactPerson_gender || '',
+          },
+          status: 'active',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }];
+      }
+
+      // Ensure branches is an array and format properly
+      const formattedBranches = Array.isArray(branches) ? branches.map(branch => ({
+        branchName: branch.branchName || 'Unnamed Branch',
+        branchCode: branch.branchCode || generateBranchCode(branch.branchName || 'Branch'),
+        email: branch.email || entry.email || '',
+        phone: branch.phone || entry.phone || '',
+        branchHead: branch.branchHead || entry.contactPerson_name || '',
+        country: branch.country || entry.country || '',
+        state: branch.state || entry.state || '',
+        city: branch.city || entry.city || '',
+        pincode: branch.pincode || entry.pincode || '',
+        address: branch.address || `${entry.city || ''}, ${entry.state || ''}, ${entry.country || ''}`,
+        contactPerson: {
+          name: branch.contactPerson?.name || entry.contactPerson_name || '',
+          designation: branch.contactPerson?.designation || entry.contactPerson_designation || '',
+          email: branch.contactPerson?.email || entry.contactPerson_email || '',
+          phone: branch.contactPerson?.phone || entry.contactPerson_phone || '',
+          gender: branch.contactPerson?.gender || entry.contactPerson_gender || '',
+        },
+        status: branch.status || 'active',
+        createdAt: branch.createdAt || new Date(),
+        updatedAt: branch.updatedAt || new Date(),
+      })) : [];
+
       const company = new Company({
         name: entry.name || '',
         companyType: entry.companyType || '',
@@ -3705,26 +5328,27 @@ export const importCompaniesFromExcel = async (req, res) => {
         state: entry.state || '',
         city: entry.city || '',
         pincode: entry.pincode || '',
-        contactPerson: {
+        contactPerson: [{
           name: entry.contactPerson_name || '',
           designation: entry.contactPerson_designation || '',
           gender: entry.contactPerson_gender || '',
           email: entry.contactPerson_email || '',
           phone: entry.contactPerson_phone || '',
           address: {
-            country: entry.contactPerson_country || '',
-            state: entry.contactPerson_state || '',
-            city: entry.contactPerson_city || '',
-            pincode: entry.contactPerson_pincode || '',
+            country: entry.contactPerson_country || entry.country || '',
+            state: entry.contactPerson_state || entry.state || '',
+            city: entry.contactPerson_city || entry.city || '',
+            pincode: entry.contactPerson_pincode || entry.pincode || '',
             street: entry.contactPerson_street || ''
           }
-        },
+        }],
         diagnostics: entry.diagnostics
-          ? entry.diagnostics.split(',').map(id => id.trim())
+          ? entry.diagnostics.split(',').map(id => id.trim()).filter(id => mongoose.Types.ObjectId.isValid(id))
           : [],
         documents: entry.documents
           ? entry.documents.split(',').map(doc => doc.trim())
           : [],
+        branches: formattedBranches, // NEW: Added branches array
         staff: [] // Staff bulk add ka feature alag se banega
       });
 
@@ -3736,90 +5360,487 @@ export const importCompaniesFromExcel = async (req, res) => {
 
     res.status(200).json({
       message: 'Companies imported successfully',
-      data: savedCompanies
+      data: savedCompanies.map(company => ({
+        id: company._id,
+        name: company.name,
+        email: company.email,
+        branches: company.branches // Include branches in response
+      }))
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to import companies' });
+    console.error('Company import failed:', error);
+    res.status(500).json({ 
+      error: 'Failed to import companies',
+      details: error.message 
+    });
   }
 };
 
+// Helper function to generate branch code
+function generateBranchCode(branchName) {
+  const prefix = branchName
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase())
+    .join('')
+    .substring(0, 3);
+  
+  const randomNum = Math.floor(1000 + Math.random() * 9000);
+  return `${prefix}${randomNum}`;
+}
 
+
+
+// // Safe JSON parse helper
+// const parseJsonField = (field, defaultVal = []) => {
+//   if (!field) return defaultVal;
+//   if (typeof field === 'object') return field;
+//   try {
+//     return JSON.parse(String(field));
+//   } catch (e) {
+//     // try to handle comma separated lists as fallback for arrays
+//     if (typeof field === 'string' && field.includes(',')) {
+//       return field.split(',').map(s => s.trim()).filter(Boolean);
+//     }
+//     return defaultVal;
+//   }
+// };
+
+// // Normalize excel entry keys (case-insensitive)
+// const getField = (entry, ...keys) => {
+//   for (const key of keys) {
+//     if (Object.prototype.hasOwnProperty.call(entry, key)) return entry[key];
+//     // try case-insensitive match
+//     const foundKey = Object.keys(entry).find(k => k.toLowerCase() === key.toLowerCase());
+//     if (foundKey) return entry[foundKey];
+//   }
+//   return undefined;
+// };
+
+
+
+// Safe JSON parse helper
+const parseJsonField = (field, defaultVal = []) => {
+  if (!field) return defaultVal;
+  if (typeof field === 'object') return field;
+  try {
+    return JSON.parse(String(field));
+  } catch (e) {
+    if (typeof field === 'string' && field.includes(',')) {
+      return field.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    return defaultVal;
+  }
+};
+
+// Normalize excel entry keys (case-insensitive)
+const getField = (entry, ...keys) => {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(entry, key)) return entry[key];
+    const foundKey = Object.keys(entry).find(k => k.toLowerCase() === key.toLowerCase());
+    if (foundKey) return entry[foundKey];
+  }
+  return undefined;
+};
 
 
 export const importStaffFromExcel = async (req, res) => {
   try {
     const file = req.file;
+    const companyId = req.params.companyId;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
 
+    const company = await Company.findById(companyId);
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
     const workbook = XLSX.readFile(file.path);
-    const sheet = workbook.SheetNames[0];
-    const data = XLSX.utils.sheet_to_json(workbook.Sheets[sheet]);
+    const sheetName = workbook.SheetNames[0];
+    const data = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
 
     const savedStaff = [];
+    const skipped = [];
 
-    for (const entry of data) {
+    // Helper function to parse any date format
+    const parseAnyDate = (dateValue) => {
+      if (!dateValue && dateValue !== 0) return null;
+      
+      console.log(`Parsing date: ${dateValue} (type: ${typeof dateValue})`);
+      
+      // If already a Date object
+      if (dateValue instanceof Date) {
+        return !isNaN(dateValue.getTime()) ? dateValue : null;
+      }
+      
+      // Handle string dates
+      if (typeof dateValue === 'string') {
+        const cleanValue = dateValue.trim();
+        
+        // 1. DD-MM-YYYY (19-05-1990, 19/05/1990)
+        const ddMMyyyy = cleanValue.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+        if (ddMMyyyy) {
+          const day = ddMMyyyy[1].padStart(2, '0');
+          const month = ddMMyyyy[2].padStart(2, '0');
+          const year = ddMMyyyy[3];
+          const date = new Date(`${year}-${month}-${day}T00:00:00`);
+          if (!isNaN(date.getTime())) {
+            console.log(`Parsed as DD-MM-YYYY: ${cleanValue} -> ${date.toISOString()}`);
+            return date;
+          }
+        }
+        
+        // 2. YYYY-MM-DD (1990-05-19)
+        const yyyyMMdd = cleanValue.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+        if (yyyyMMdd) {
+          const year = yyyyMMdd[1];
+          const month = yyyyMMdd[2].padStart(2, '0');
+          const day = yyyyMMdd[3].padStart(2, '0');
+          const date = new Date(`${year}-${month}-${day}T00:00:00`);
+          if (!isNaN(date.getTime())) {
+            console.log(`Parsed as YYYY-MM-DD: ${cleanValue} -> ${date.toISOString()}`);
+            return date;
+          }
+        }
+        
+        // 3. MM-DD-YYYY (05-19-1990)
+        const mmDDyyyy = cleanValue.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+        if (mmDDyyyy) {
+          const month = mmDDyyyy[1].padStart(2, '0');
+          const day = mmDDyyyy[2].padStart(2, '0');
+          const year = mmDDyyyy[3];
+          const date = new Date(`${year}-${month}-${day}T00:00:00`);
+          if (!isNaN(date.getTime())) {
+            console.log(`Parsed as MM-DD-YYYY: ${cleanValue} -> ${date.toISOString()}`);
+            return date;
+          }
+        }
+        
+        // 4. Try with dots (19.05.1990)
+        const dotFormat = cleanValue.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+        if (dotFormat) {
+          const day = dotFormat[1].padStart(2, '0');
+          const month = dotFormat[2].padStart(2, '0');
+          const year = dotFormat[3];
+          const date = new Date(`${year}-${month}-${day}T00:00:00`);
+          if (!isNaN(date.getTime())) {
+            console.log(`Parsed as DD.MM.YYYY: ${cleanValue} -> ${date.toISOString()}`);
+            return date;
+          }
+        }
+        
+        // 5. Try direct JavaScript Date parsing
+        const directDate = new Date(cleanValue);
+        if (!isNaN(directDate.getTime())) {
+          console.log(`Direct parsing successful: ${cleanValue} -> ${directDate.toISOString()}`);
+          return directDate;
+        }
+        
+        // 6. Try parsing without separators (19051990)
+        const noSep = cleanValue.match(/^(\d{2})(\d{2})(\d{4})$/);
+        if (noSep) {
+          const day = noSep[1];
+          const month = noSep[2];
+          const year = noSep[3];
+          const date = new Date(`${year}-${month}-${day}T00:00:00`);
+          if (!isNaN(date.getTime())) {
+            console.log(`Parsed as DDMMYYYY: ${cleanValue} -> ${date.toISOString()}`);
+            return date;
+          }
+        }
+        
+        // 7. Try parsing as Excel serial string
+        if (!isNaN(cleanValue)) {
+          const excelSerial = new Date((Number(cleanValue) - 25569) * 86400 * 1000);
+          if (!isNaN(excelSerial.getTime())) {
+            console.log(`Parsed as Excel serial: ${cleanValue} -> ${excelSerial.toISOString()}`);
+            return excelSerial;
+          }
+        }
+      }
+      
+      // Handle numbers (Excel serial dates)
+      if (typeof dateValue === 'number') {
+        // Excel serial number (days since 1900-01-00)
+        const excelDate = new Date((dateValue - 25569) * 86400 * 1000);
+        if (!isNaN(excelDate.getTime())) {
+          console.log(`Parsed as Excel number: ${dateValue} -> ${excelDate.toISOString()}`);
+          return excelDate;
+        }
+        
+        // Try as timestamp
+        const timestampDate = new Date(dateValue);
+        if (!isNaN(timestampDate.getTime())) {
+          console.log(`Parsed as timestamp: ${dateValue} -> ${timestampDate.toISOString()}`);
+          return timestampDate;
+        }
+      }
+      
+      console.warn(`❌ Could not parse date: ${dateValue}`);
+      return null;
+    };
+
+    for (const [index, entry] of data.entries()) {
       try {
-        const staff = new Staff({
-          name: entry.name || '',
-          email: entry.email || '',
-          password: entry.password || '',
-          role: entry.role || 'Staff', // Default to 'Staff' role
-          contact_number: entry.contact_number || '',
-          address: entry.address || '',
-          createdAt: entry.createdAt ? new Date(entry.createdAt) : new Date(),
-          updatedAt: entry.updatedAt ? new Date(entry.updatedAt) : new Date(),
-          myBookings: entry.myBookings ? entry.myBookings.split(',').map(id => id.trim()) : [],
-          wallet_balance: Number(entry.wallet_balance) || 0,
-          doctorAppointments: entry.doctorAppointments ? entry.doctorAppointments.split(',').map(id => mongoose.Types.ObjectId(id.trim())) : [], // Convert to ObjectId
-          wallet_logs: parseJsonField(entry.wallet_logs),
-          family_members: parseJsonField(entry.family_members),
-          profileImage: entry.profileImage || '',
-          addresses: parseJsonField(entry.addresses),
-          issues: parseJsonField(entry.issues)
+        console.log(`\n=== Processing Row ${index + 2} ===`);
+        
+        // Debug: Log all available fields
+        console.log('Available fields:', Object.keys(entry));
+        
+        // आपके Excel headers के according fields get करें
+        const name = getField(entry, 'Name', 'Employee Name', 'name') || '';
+        const employeeId = getField(entry, 'Employee ID', 'EmployeeID', 'Emp ID', 'employeeId') || '';
+        const role = getField(entry, 'Role', 'role') || 'Staff';
+        const department = getField(entry, 'Department', 'department') || '';
+        const contact_number = getField(entry, 'Contact Number', 'ContactNumber', 'Phone', 'contact') || '';
+        const email = getField(entry, 'Email', 'email') || '';
+        
+        // DOB को किसी भी header से get करें
+        const dobRaw = getField(entry, 'DOB (YYYY-MM-DD)', 'DOB', 'Date of Birth', 'Birth Date', 
+                              'dob', 'date_of_birth', 'BirthDate', 'Date', 'DOB');
+        
+        console.log(`DOB Raw Value: "${dobRaw}" (Type: ${typeof dobRaw})`);
+        
+        // Parse dob using our universal date parser
+        const dob = parseAnyDate(dobRaw);
+        
+        if (dobRaw && !dob) {
+          console.warn(`⚠️  Date parsing failed for: ${dobRaw}`);
+          skipped.push({
+            row: index + 2,
+            reason: 'Invalid DOB format',
+            dob: dobRaw,
+            suggestion: 'Use format: YYYY-MM-DD, DD-MM-YYYY, or MM/DD/YYYY'
+          });
+        }
+        
+        const gender = getField(entry, 'Gender', 'gender', 'Sex') || '';
+        const ageRaw = getField(entry, 'Age', 'age');
+        const age = ageRaw !== undefined && ageRaw !== null && ageRaw !== '' ? Number(ageRaw) : undefined;
+        const address = getField(entry, 'Address', 'address', 'Location') || '';
+        const password = getField(entry, 'Password', 'password', 'pass') || '';
+        const branch = getField(entry, 'Branch ID (Optional)', 'Branch ID', 'Branch', 
+                              'branch_id', 'branch', 'BranchId') || '';
+
+        // Optional: Additional fields if needed
+        const walletRaw = getField(entry, 'wallet_balance', 'Wallet', 'wallet') || 0;
+        const wallet_balance = Number(walletRaw) || 0;
+
+        // Debug log all extracted values
+        console.log('Extracted values:', {
+          name,
+          employeeId,
+          email,
+          dob: dob ? dob.toISOString().split('T')[0] : 'null',
+          gender,
+          age,
+          department,
+          role,
+          contact_number,
+          branch
         });
 
+        // Add other optional fields parsing if needed...
+        const wallet_logs = parseJsonField(getField(entry, 'wallet_logs', 'Wallet Logs'), []);
+        const family_members = parseJsonField(getField(entry, 'family_members', 'Family Members'), []);
+        const addresses = parseJsonField(getField(entry, 'addresses', 'Addresses'), []);
+        const issues = parseJsonField(getField(entry, 'issues', 'Issues'), []);
+        const doctorAppointmentsRaw = getField(entry, 'doctorAppointments', 'Doctor Appointments', 'doctorappointments');
+        const doctorAppointments = (doctorAppointmentsRaw ? String(doctorAppointmentsRaw).split(',').map(s => s.trim()).filter(Boolean).map(id => {
+          try { return mongoose.Types.ObjectId(id); } catch (e) { return null; }
+        }).filter(Boolean) : []);
+
+        // Build payload with available fields
+        const staffPayload = {};
+        if (employeeId) staffPayload.employeeId = employeeId;
+        if (name) staffPayload.name = name;
+        if (email) staffPayload.email = email;
+        if (password) staffPayload.password = password;
+        if (role) staffPayload.role = role;
+        if (contact_number) staffPayload.contact_number = contact_number;
+        if (address) staffPayload.address = address;
+        if (department) staffPayload.department = department;
+        if (gender) staffPayload.gender = gender;
+        if (dob) {
+          staffPayload.dob = dob;
+          console.log(`✅ DOB set: ${dob.toISOString()}`);
+        }
+        if (age !== undefined) staffPayload.age = age;
+        if (wallet_balance !== undefined) staffPayload.wallet_balance = wallet_balance;
+        if (branch) staffPayload.branch = branch;
+        if (doctorAppointments.length) staffPayload.doctorAppointments = doctorAppointments;
+        if (wallet_logs && wallet_logs.length) staffPayload.wallet_logs = wallet_logs;
+        if (family_members && family_members.length) staffPayload.family_members = family_members;
+        if (addresses && addresses.length) staffPayload.addresses = addresses;
+        if (issues && issues.length) staffPayload.issues = issues;
+
+        // Validation
+        if (!email && !name) {
+          skipped.push({ row: index + 2, reason: 'Missing both name and email', raw: entry });
+          continue;
+        }
+
+        // Branch validation
+        if (branch) {
+          try {
+            const branchExists = company.branches.some(b => b._id.toString() === branch);
+            if (!branchExists) {
+              skipped.push({ row: index + 2, reason: 'Invalid branch ID - branch not found in company', branch, raw: entry });
+              continue;
+            }
+          } catch (branchErr) {
+            skipped.push({ row: index + 2, reason: 'Invalid branch ID format', branch, error: branchErr.message, raw: entry });
+            continue;
+          }
+        }
+
+        // Email uniqueness check
+        if (email) {
+          const exists = await Staff.findOne({ email }).lean();
+          if (exists) {
+            skipped.push({ row: index + 2, reason: 'Email already exists', email });
+            continue;
+          }
+        }
+
+        // Create and save staff
+        const staff = new Staff(staffPayload);
         const saved = await staff.save();
         savedStaff.push(saved);
-      } catch (error) {
-        console.error('Error processing entry:', entry, error);
+
+        console.log(`✅ Staff saved: ${saved.name} (${saved.email})`);
+        console.log(`   DOB in DB: ${saved.dob ? saved.dob.toISOString() : 'null'}`);
+
+        // Add to company staff array
+        const staffInfoForCompany = {
+          _id: saved._id,
+          employeeId: saved.employeeId || '',
+          name: saved.name,
+          role: saved.role,
+          contact_number: saved.contact_number,
+          email: saved.email,
+          dob: saved.dob,
+          gender: saved.gender,
+          age: saved.age,
+          address: saved.address,
+          profileImage: saved.profileImage,
+          idImage: saved.idImage,
+          wallet_balance: saved.wallet_balance,
+          department: saved.department,
+          designation: saved.designation || '',
+          branch: saved.branch,
+        };
+
+        console.log(`Adding staff to company:`, staffInfoForCompany);
+
+        const updatedCompany = await Company.findByIdAndUpdate(companyId, {
+          $push: { staff: staffInfoForCompany }
+        }, { new: true });
+
+        if (updatedCompany) {
+          console.log(`✅ Successfully added staff to company: ${companyId}`);
+        } else {
+          console.log(`❌ Failed to update company ${companyId} with staff details.`);
+        }
+
+        // Send email
+        let mailSent = false;
+        let mailSentAt = null;
+        if (saved.email) {
+          const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+              user: 'support@credenthealth.com',
+              pass: 'sgiiitsfrtadacaq'
+            }
+          });
+
+          const mailOptions = {
+            from: 'support@credenthealth.com',
+            to: saved.email,
+            subject: 'Your CredentHealth Login Credentials',
+            text: `Dear ${saved.name || 'User'},\n\nYour account on the CredentHealth Portal has been successfully created. Please find your login details below:\n\nWebsite: https://credenthealth.com/\n\nLogin ID: ${saved.email}\nPassword: ${password || saved.password || ''}\n\nYou may now log in using the above credentials to access your account and portal services.\n\nIf you require any assistance, please reach out to our support team at support@credenthealth.com.\n\nThank you for choosing CredentHealth.\n\nWarm regards,\nTeam CredentHealth | CredentHealth | Elthium Healthcare Pvt. Ltd. | support@credenthealth.com`
+          };
+
+          try {
+            const info = await transporter.sendMail(mailOptions);
+            console.log(`📧 Email sent to ${saved.email}: ${info.response}`);
+            mailSent = true;
+            mailSentAt = new Date();
+
+            await Staff.findByIdAndUpdate(saved._id, {
+              $set: {
+                mailSent: mailSent,
+                mailSentAt: mailSentAt
+              }
+            });
+
+            // Update company staff array with mailSent
+            await Company.findByIdAndUpdate(companyId, {
+              $addToSet: {
+                staff: {
+                  ...staffInfoForCompany,
+                  mailSent: mailSent,
+                  mailSentAt: mailSentAt
+                }
+              }
+            });
+
+          } catch (mailErr) {
+            console.error(`❌ Failed to send email to ${saved.email}:`, mailErr);
+            skipped.push({ row: index + 2, reason: 'Email send failed', email: saved.email, error: mailErr.message });
+          }
+        }
+
+        console.log(`=== Row ${index + 2} Completed ===\n`);
+
+      } catch (rowErr) {
+        console.error('❌ Error processing row:', rowErr);
+        skipped.push({ 
+          row: index + 2, 
+          reason: 'Processing error', 
+          error: rowErr.message, 
+          raw: entry 
+        });
       }
     }
 
-    fs.unlinkSync(file.path); // Remove the uploaded Excel file
+    // Clean up uploaded file
+    try { 
+      fs.unlinkSync(file.path); 
+    } catch (e) { 
+      console.warn('Failed to delete uploaded file', e); 
+    }
 
-    res.status(200).json({
-      message: 'Staff imported successfully',
-      data: savedStaff
+    console.log(`\n✅ Import finished: ${savedStaff.length} staff records saved.`);
+    console.log(`⚠️  Skipped rows: ${skipped.length}`);
+    
+    if (skipped.length > 0) {
+      console.log('Skipped details:', skipped);
+    }
+
+    return res.status(200).json({
+      message: 'Import completed',
+      savedCount: savedStaff.length,
+      saved: savedStaff.map(s => ({ 
+        id: s._id, 
+        employeeId: s.employeeId,
+        name: s.name, 
+        email: s.email,
+        dob: s.dob ? s.dob.toISOString().split('T')[0] : null,
+        department: s.department,
+        branch: s.branch
+      })),
+      skipped
     });
+
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to import staff' });
+    console.error('❌ Import failed:', error);
+    return res.status(500).json({ 
+      error: 'Failed to import staff', 
+      details: error.message 
+    });
   }
 };
-
-// Helper function to parse JSON fields safely
-function parseJsonField(field) {
-  if (!field) return [];
-
-  try {
-    // Assuming the field is a comma-separated string of JSON objects
-    return field.split(',').map(item => {
-      try {
-        return JSON.parse(item.trim()); // Trim extra spaces and parse JSON
-      } catch (e) {
-        console.error('Invalid JSON:', item);
-        return {}; // Return an empty object on invalid JSON
-      }
-    });
-  } catch (error) {
-    console.error('Error parsing field:', field, error);
-    return [];
-  }
-}
-
-
-
 export const getDashboardCounts = async (req, res) => {
   try {
     // 1. Get counts in parallel
@@ -3948,31 +5969,66 @@ const getAgeRange = (ageGroup) => {
 
 export const addTestsToStaffByAgeGroup = async (req, res) => {
   try {
-    const { ageGroup, diagnostics, applyToAllStaff } = req.body;
+    const { ageGroup, diagnostics, applyToAllStaff, companyId } = req.body;
 
+    console.log("===== REQUEST BODY =====");
+    console.log("Company ID from request:", companyId);
+    console.log("Age Group:", ageGroup);
+
+    // ✅ Step 1: Staff fetch logic WITHOUT companyId check
     let staffMembers = [];
 
-    // ✅ Step 1: Staff fetch logic
     if (applyToAllStaff) {
+      // सभी staff fetch करें (companyId के बिना)
       staffMembers = await Staff.find({});
+      console.log(`Fetched ALL staff: ${staffMembers.length}`);
     } else {
-      if (!ageGroup || !ageGroup.includes("-")) {
-        return res.status(400).json({ message: 'Invalid or missing age group. Use format like "20-30".' });
+      if (!ageGroup) {
+        return res.status(400).json({ message: 'Age group is required.' });
       }
 
-      const [minAgeStr, maxAgeStr] = ageGroup.split('-');
-      const minAge = parseInt(minAgeStr);
-      const maxAge = parseInt(maxAgeStr);
+      // Support multiple age groups separated by commas
+      const ageRanges = ageGroup.split(',').map(range => range.trim());
+      console.log("Age ranges parsed:", ageRanges);
 
-      if (isNaN(minAge) || isNaN(maxAge)) {
-        return res.status(400).json({ message: 'Invalid age group format. Use format like "20-30".' });
+      const ageQueryConditions = [];
+
+      for (const range of ageRanges) {
+        if (!range.includes('-')) {
+          return res.status(400).json({ message: `Invalid age group format: "${range}". Use format like "20-30".` });
+        }
+
+        const [minAgeStr, maxAgeStr] = range.split('-');
+        const minAge = parseInt(minAgeStr);
+        const maxAge = parseInt(maxAgeStr);
+
+        if (isNaN(minAge) || isNaN(maxAge)) {
+          return res.status(400).json({ message: `Invalid age range: "${range}".` });
+        }
+
+        ageQueryConditions.push({ age: { $gte: minAge, $lte: maxAge } });
       }
 
-      staffMembers = await Staff.find({ age: { $gte: minAge, $lte: maxAge } });
+      // Query staff matching any of the age ranges (companyId के बिना)
+      staffMembers = await Staff.find({ $or: ageQueryConditions });
 
       if (staffMembers.length === 0) {
-        return res.status(404).json({ message: 'No staff found for the given age group.' });
+        // Debug: Check what ages exist in database
+        const allStaffAges = await Staff.find({}, 'age name');
+        console.log("Available staff ages:", allStaffAges.map(s => ({ name: s.name, age: s.age })).slice(0, 10));
+        
+        return res.status(404).json({ 
+          message: 'No staff found for the given age group(s).',
+          details: {
+            ageRanges,
+            totalStaffCount: allStaffAges.length,
+            availableAges: [...new Set(allStaffAges.map(s => s.age).filter(Boolean).sort((a,b) => a-b))]
+          }
+        });
       }
+
+      console.log(`Fetched Staff by age group: ${staffMembers.length}`);
+      console.log("Sample staff:", staffMembers.slice(0, 3).map(s => ({ name: s.name, age: s.age })));
     }
 
     // ✅ Step 2: Validate diagnostic + package existence
@@ -3983,54 +6039,785 @@ export const addTestsToStaffByAgeGroup = async (req, res) => {
       return res.status(404).json({ message: 'No diagnostics found matching the provided IDs.' });
     }
 
-    // ✅ Step 3: Loop through each staff member and assign packages
+    // ✅ Step 3: Fetch company (if companyId provided)
+    let company = null;
+    if (companyId) {
+      company = await Company.findById(companyId);
+      if (company) {
+        console.log(`Company found: ${company.companyName}`);
+      } else {
+        console.log("Company not found, but continuing with staff assignment only");
+      }
+    }
+
+    // Prepare arrays to collect assigned data
+    const companyPackagesToAdd = [];
+    const companyDiagnosticsToAdd = []; // New: For diagnostics
+
+    // ✅ Step 4: Loop through each staff member and assign packages
     for (const staff of staffMembers) {
+      console.log("\n-------------------------------");
+      console.log("STAFF:", staff.name, staff._id, "Age:", staff.age);
       let updated = false;
 
       for (const diagnostic of diagnostics) {
         const matchedDiagnostic = diagnosticDocs.find(d => d._id.toString() === diagnostic.diagnosticId);
         if (!matchedDiagnostic) continue;
 
+        console.log("Processing Diagnostic:", matchedDiagnostic.name);
+
+        // Add diagnostic to company diagnostics array (if company exists)
+        if (company) {
+          const diagnosticExistsInCompany = companyDiagnosticsToAdd.some(d => 
+            d.diagnosticId.toString() === matchedDiagnostic._id.toString()
+          );
+
+          if (!diagnosticExistsInCompany) {
+            companyDiagnosticsToAdd.push({
+              diagnosticId: matchedDiagnostic._id,
+              diagnosticName: matchedDiagnostic.name,
+              diagnosticImage: matchedDiagnostic.image,
+              assignedAt: new Date()
+            });
+          }
+        }
+
         const selectedPackageIds = Array.isArray(diagnostic.packageIds) ? diagnostic.packageIds : [];
+        console.log("Selected Package IDs:", selectedPackageIds);
 
         for (const pkgId of selectedPackageIds) {
           const matchedPackage = matchedDiagnostic.packages.find(pkg => pkg._id.toString() === pkgId);
-          if (!matchedPackage) continue;
+          if (!matchedPackage) {
+            console.log("❌ Package NOT FOUND:", pkgId);
+            continue;
+          }
 
-          const alreadyExists = staff.myPackages.some(p =>
-            p.diagnosticId.toString() === matchedDiagnostic._id.toString() &&
-            p.packageId.toString() === matchedPackage._id.toString()
-          );
+          console.log("Matched Package:", matchedPackage.packageName);
 
-          if (!alreadyExists) {
-            staff.myPackages.push({
+          // Check if package already exists in staff
+          const existsInStaff = staff.myPackages?.some(p =>
+            p.diagnosticId?.toString() === matchedDiagnostic._id.toString() &&
+            p.packageId?.toString() === matchedPackage._id.toString()
+          ) || false;
+
+          if (existsInStaff) {
+            console.log("⚠️ Already Assigned to Staff → Skipping");
+          } else {
+            console.log("✅ Adding Package to Staff:", matchedPackage.packageName);
+
+            // Initialize myPackages if it doesn't exist
+            if (!staff.myPackages) {
+              staff.myPackages = [];
+            }
+
+            const packageData = {
               diagnosticId: matchedDiagnostic._id,
+              diagnosticName: matchedDiagnostic.name,
               packageId: matchedPackage._id,
               packageName: matchedPackage.packageName,
               price: matchedPackage.price,
-              offerPrice: matchedPackage.offerPrice,
-              tests: matchedPackage.tests,
-            });
+              offerPrice: matchedPackage.offerPrice || matchedPackage.price,
+              tests: matchedPackage.tests || [],
+              description: matchedPackage.description || '',
+              precautions: matchedPackage.precautions || '',
+              totalTestsIncluded: matchedPackage.totalTestsIncluded || 0,
+              assignedAt: new Date()
+            };
+
+            // Add companyId if company exists
+            if (company) {
+              packageData.companyId = company._id;
+            }
+
+            staff.myPackages.push(packageData);
             updated = true;
+          }
+
+          // Collect package for company if company exists
+          if (company) {
+            const packageExistsInCompany = companyPackagesToAdd.some(p =>
+              p.diagnosticId?.toString() === matchedDiagnostic._id.toString() &&
+              p.packageId?.toString() === matchedPackage._id.toString()
+            );
+
+            if (!packageExistsInCompany) {
+              companyPackagesToAdd.push({
+                diagnosticId: matchedDiagnostic._id,
+                diagnosticName: matchedDiagnostic.name,
+                packageId: matchedPackage._id,
+                packageName: matchedPackage.packageName,
+                price: matchedPackage.price,
+                offerPrice: matchedPackage.offerPrice || matchedPackage.price,
+                tests: matchedPackage.tests || [],
+                description: matchedPackage.description || '',
+                precautions: matchedPackage.precautions || '',
+                totalTestsIncluded: matchedPackage.totalTestsIncluded || 0,
+                totalStaffAssigned: staffMembers.length,
+                assignedAt: new Date()
+              });
+            }
           }
         }
       }
 
-      if (updated) await staff.save();
+      if (updated) {
+        console.log("💾 Saving staff:", staff.name);
+        await staff.save();
+      } else {
+        console.log("⚠️ No updates for staff:", staff.name);
+      }
+    }
+
+    // ✅ Step 5: Add data to company if company exists
+    if (company) {
+      console.log("\n===== Adding Data to Company =====");
+      
+      // 5.1 Add diagnostics to company diagnostics array
+      if (companyDiagnosticsToAdd.length > 0) {
+        console.log(`Adding ${companyDiagnosticsToAdd.length} unique diagnostics to company`);
+        
+        // Initialize company.diagnostics array if it doesn't exist
+        if (!company.diagnostics) {
+          company.diagnostics = [];
+        }
+        
+        for (const diagToAdd of companyDiagnosticsToAdd) {
+          // Check if diagnostic already exists in company
+          const existsInCompany = company.diagnostics.some(d =>
+            d.diagnosticId && d.diagnosticId.toString() === diagToAdd.diagnosticId.toString()
+          );
+          
+          if (!existsInCompany) {
+            company.diagnostics.push(diagToAdd);
+            console.log("✅ Added Diagnostic to Company:", diagToAdd.diagnosticName);
+          } else {
+            console.log("⚠️ Diagnostic already exists in Company:", diagToAdd.diagnosticName);
+          }
+        }
+      }
+      
+      // 5.2 Add packages to company packages array
+      if (companyPackagesToAdd.length > 0) {
+        console.log(`Adding ${companyPackagesToAdd.length} unique packages to company`);
+
+        // Initialize company.packages if it doesn't exist
+        if (!company.packages) {
+          company.packages = [];
+        }
+
+        for (const packageToAdd of companyPackagesToAdd) {
+          // Check if package already exists in company
+          const existsInCompany = company.packages.some(p =>
+            p.diagnosticId?.toString() === packageToAdd.diagnosticId.toString() &&
+            p.packageId?.toString() === packageToAdd.packageId.toString()
+          );
+
+          if (!existsInCompany) {
+            company.packages.push(packageToAdd);
+            console.log("✅ Added to Company:", packageToAdd.packageName);
+          } else {
+            console.log("⚠️ Already exists in Company:", packageToAdd.packageName);
+            
+            // Update total staff count for existing package
+            const existingPackage = company.packages.find(p =>
+              p.diagnosticId?.toString() === packageToAdd.diagnosticId.toString() &&
+              p.packageId?.toString() === packageToAdd.packageId.toString()
+            );
+            
+            if (existingPackage) {
+              existingPackage.totalStaffAssigned = (existingPackage.totalStaffAssigned || 0) + staffMembers.length;
+            }
+          }
+        }
+      }
+
+      await company.save();
+      console.log("💾 Company data updated (diagnostics and packages)");
     }
 
     res.status(200).json({
-      message: `Packages assigned to ${applyToAllStaff ? 'all staff' : 'staff within age group'} successfully.`
+      message: `Packages assigned to ${applyToAllStaff ? 'all staff' : 'staff within specified age group(s)'} successfully.`,
+      staffCount: staffMembers.length,
+      companyDiagnosticsAdded: companyDiagnosticsToAdd.length,
+      companyPackagesAdded: companyPackagesToAdd.length,
+      companyName: company ? company.companyName : "No company specified",
+      staffNames: staffMembers.slice(0, 5).map(s => s.name) // First 5 names only
     });
 
   } catch (error) {
     console.error('Error in addTestsToStaffByAgeGroup:', error);
-    res.status(500).json({ message: 'Internal server error', error });
+    res.status(500).json({ message: 'Internal server error', error: error.message });
   }
 };
 
 
+export const addTestToStaffByAgeGroup = async (req, res) => {
+  try {
+    const { ageGroup, diagnostics, applyToAllStaff, companyId } = req.body;
 
+    console.log("===== Incoming Payload =====");
+    console.log(JSON.stringify(req.body, null, 2));
+
+    let staffMembers = [];
+    let company = null;
+
+    // Step 1 → Fetch company if companyId provided
+    if (companyId) {
+      company = await Company.findById(companyId);
+      if (company) {
+        console.log(`Company found: ${company.companyName}`);
+      } else {
+        console.log("Company not found, but continuing with staff assignment");
+      }
+    }
+
+    // Step 2 → Fetch staff WITHOUT companyId check (temporary fix)
+    if (applyToAllStaff) {
+      // Fetch all staff (since companyId field doesn't exist)
+      staffMembers = await Staff.find({});
+      console.log(`Fetched ALL staff: ${staffMembers.length}`);
+    } else {
+      if (!ageGroup) {
+        return res.status(400).json({ message: "Age group is required when not applying to all staff" });
+      }
+
+      const ageRanges = ageGroup.split(',').map(r => r.trim());
+      console.log("Age Ranges:", ageRanges);
+
+      // Create age conditions WITHOUT companyId
+      const conditions = ageRanges.map(range => {
+        const [minA, maxA] = range.split('-');
+        return { 
+          age: { $gte: parseInt(minA), $lte: parseInt(maxA) } 
+        };
+      });
+
+      // Fetch staff by age only
+      staffMembers = await Staff.find({ $or: conditions });
+      console.log(`Fetched Staff by age group: ${staffMembers.length}`);
+    }
+
+    if (staffMembers.length === 0) {
+      console.log("No staff found");
+      
+      // Debug: Show what ages exist in database
+      const sampleStaff = await Staff.find({}, 'name age').limit(10);
+      console.log("Sample staff ages in DB:", sampleStaff.map(s => ({ name: s.name, age: s.age })));
+      
+      return res.status(404).json({ 
+        message: "No staff found for the given criteria",
+        debug: {
+          totalStaffInDB: await Staff.countDocuments(),
+          sampleAges: sampleStaff.map(s => s.age),
+          ageGroupRequested: ageGroup
+        }
+      });
+    }
+
+    // Step 3 → Validate diagnostics
+    const diagnosticIds = diagnostics.map(d => d.diagnosticId);
+    console.log("Diagnostic IDs:", diagnosticIds);
+
+    const diagnosticDocs = await Diagnostic.find({ _id: { $in: diagnosticIds } }).populate("tests");
+
+    console.log("Diagnostics Found:", diagnosticDocs.length);
+
+    // Prepare arrays to collect assigned data
+    const companyTestsToAdd = [];
+    const companyDiagnosticsToAdd = []; // New: For diagnostics
+
+    // Step 4 → Loop through staff and assign tests
+    for (const staff of staffMembers) {
+      console.log("\n-------------------------------");
+      console.log("STAFF:", staff.name, staff._id, "Age:", staff.age);
+      let updated = false;
+
+      for (const diag of diagnostics) {
+        console.log("Processing Diagnostic:", diag.diagnosticId);
+
+        const diagDoc = diagnosticDocs.find(d => d._id.toString() === diag.diagnosticId);
+        if (!diagDoc) {
+          console.log("❌ Diagnostic NOT FOUND:", diag.diagnosticId);
+          continue;
+        }
+
+        console.log("Selected Tests From FE:", diag.testIds);
+
+        // Add diagnostic to company diagnostics array (if company exists)
+        if (company) {
+          const diagnosticExistsInCompany = companyDiagnosticsToAdd.some(d => 
+            d.diagnosticId.toString() === diagDoc._id.toString()
+          );
+
+          if (!diagnosticExistsInCompany) {
+            companyDiagnosticsToAdd.push({
+              diagnosticId: diagDoc._id,
+              diagnosticName: diagDoc.name,
+              diagnosticImage: diagDoc.image,
+              assignedAt: new Date()
+            });
+          }
+        }
+
+        const selectedTests = diag.testIds || [];
+
+        for (const testObj of selectedTests) {
+          console.log("Test Object From FE:", testObj);
+
+          const matchedTest = await Test.findById(testObj.testId);
+
+          if (!matchedTest) {
+            console.log("❌ Test NOT FOUND in DB:", testObj.testId);
+            continue;
+          }
+
+          console.log("Matched DB Test:", matchedTest.name);
+
+          // Initialize myTests array if it doesn't exist
+          if (!staff.myTests) {
+            staff.myTests = [];
+          }
+
+          // Check if test already exists in staff
+          const existsInStaff = staff.myTests.some(t =>
+            t.diagnosticId && t.diagnosticId.toString() === diagDoc._id.toString() &&
+            t.testId && t.testId.toString() === matchedTest._id.toString()
+          );
+
+          if (existsInStaff) {
+            console.log("⚠️ Already Assigned to Staff → Skipping");
+          } else {
+            console.log("✅ Adding Test to Staff:", matchedTest.name);
+
+            const testData = {
+              diagnosticId: diagDoc._id,
+              diagnosticName: diagDoc.name,
+              testId: matchedTest._id,
+              testName: matchedTest.name,
+              price: matchedTest.price,
+              fastingRequired: matchedTest.fastingRequired,
+              homeCollectionAvailable: matchedTest.homeCollectionAvailable,
+              reportIn24Hrs: matchedTest.reportIn24Hrs,
+              reportHour: matchedTest.reportHour,
+              description: matchedTest.description,
+              instruction: matchedTest.instruction,
+              precaution: matchedTest.precaution,
+              image: matchedTest.image,
+              subTests: testObj.subTests || [],
+              assignedAt: new Date()
+            };
+
+            // Add companyId if company exists
+            if (company) {
+              testData.companyId = company._id;
+            }
+
+            staff.myTests.push(testData);
+            updated = true;
+          }
+
+          // Collect test for company if company exists
+          if (company) {
+            const testExistsInCompany = companyTestsToAdd.some(t =>
+              t.diagnosticId && t.diagnosticId.toString() === diagDoc._id.toString() &&
+              t.testId && t.testId.toString() === matchedTest._id.toString()
+            );
+
+            if (!testExistsInCompany) {
+              companyTestsToAdd.push({
+                diagnosticId: diagDoc._id,
+                diagnosticName: diagDoc.name,
+                testId: matchedTest._id,
+                testName: matchedTest.name,
+                price: matchedTest.price,
+                fastingRequired: matchedTest.fastingRequired,
+                homeCollectionAvailable: matchedTest.homeCollectionAvailable,
+                reportIn24Hrs: matchedTest.reportIn24Hrs,
+                reportHour: matchedTest.reportHour,
+                description: matchedTest.description,
+                instruction: matchedTest.instruction,
+                precaution: matchedTest.precaution,
+                image: matchedTest.image,
+                subTests: testObj.subTests || [],
+                totalStaffAssigned: staffMembers.length,
+                assignedAt: new Date()
+              });
+            }
+          }
+        }
+      }
+
+      if (updated) {
+        console.log("💾 Saving staff:", staff.name);
+        await staff.save();
+      } else {
+        console.log("⚠️ No updates for staff:", staff.name);
+      }
+    }
+
+    // Step 5 → Add data to company if company exists
+    if (company) {
+      console.log("\n===== Adding Data to Company =====");
+      
+      // 5.1 Add diagnostics to company diagnostics array
+      if (companyDiagnosticsToAdd.length > 0) {
+        console.log(`Adding ${companyDiagnosticsToAdd.length} unique diagnostics to company`);
+        
+        // Initialize company.diagnostics array if it doesn't exist
+        if (!company.diagnostics) {
+          company.diagnostics = [];
+        }
+        
+        for (const diagToAdd of companyDiagnosticsToAdd) {
+          // Check if diagnostic already exists in company
+          const existsInCompany = company.diagnostics.some(d =>
+            d.diagnosticId && d.diagnosticId.toString() === diagToAdd.diagnosticId.toString()
+          );
+          
+          if (!existsInCompany) {
+            company.diagnostics.push(diagToAdd);
+            console.log("✅ Added Diagnostic to Company:", diagToAdd.diagnosticName);
+          } else {
+            console.log("⚠️ Diagnostic already exists in Company:", diagToAdd.diagnosticName);
+          }
+        }
+      }
+      
+      // 5.2 Add tests to company tests array
+      if (companyTestsToAdd.length > 0) {
+        console.log(`Adding ${companyTestsToAdd.length} unique tests to company`);
+
+        // Initialize company.tests array if it doesn't exist
+        if (!company.tests) {
+          company.tests = [];
+        }
+
+        for (const testToAdd of companyTestsToAdd) {
+          // Check if test already exists in company
+          const existsInCompany = company.tests.some(t =>
+            t.diagnosticId && t.diagnosticId.toString() === testToAdd.diagnosticId.toString() &&
+            t.testId && t.testId.toString() === testToAdd.testId.toString()
+          );
+
+          if (!existsInCompany) {
+            company.tests.push(testToAdd);
+            console.log("✅ Added to Company:", testToAdd.testName);
+          } else {
+            console.log("⚠️ Already exists in Company:", testToAdd.testName);
+            
+            // Update total staff count for existing test
+            const existingTest = company.tests.find(t =>
+              t.diagnosticId && t.diagnosticId.toString() === testToAdd.diagnosticId.toString() &&
+              t.testId && t.testId.toString() === testToAdd.testId.toString()
+            );
+            
+            if (existingTest) {
+              existingTest.totalStaffAssigned = (existingTest.totalStaffAssigned || 0) + staffMembers.length;
+            }
+          }
+        }
+      }
+
+      await company.save();
+      console.log("💾 Company data updated (diagnostics and tests)");
+    }
+
+    return res.status(200).json({ 
+      message: "Tests assigned successfully.",
+      staffCount: staffMembers.length,
+      companyDiagnosticsAdded: companyDiagnosticsToAdd.length,
+      companyTestsAdded: companyTestsToAdd.length,
+      companyName: company ? company.companyName : "Not specified",
+      assignedStaff: staffMembers.slice(0, 5).map(s => ({ name: s.name, age: s.age }))
+    });
+
+  } catch (error) {
+    console.error("Error in addTestsToStaffByAgeGroup:", error);
+    return res.status(500).json({ 
+      message: "Internal server error", 
+      error: error.message,
+      stack: error.stack 
+    });
+  }
+};
+
+export const addScansToStaffByAgeGroup = async (req, res) => {
+  try {
+    const { ageGroup, diagnostics, applyToAllStaff, companyId } = req.body;
+
+    console.log("===== Incoming Scan Payload =====");
+    console.log(JSON.stringify(req.body, null, 2));
+
+    let staffMembers = [];
+    let company = null;
+
+    // Step 1 → Fetch company if companyId provided
+    if (companyId) {
+      company = await Company.findById(companyId);
+      if (company) {
+        console.log(`Company found: ${company.companyName}`);
+      } else {
+        console.log("Company not found, but continuing with staff assignment");
+      }
+    }
+
+    // Step 2 → Fetch staff WITHOUT companyId check
+    if (applyToAllStaff) {
+      // Fetch all staff (since companyId field doesn't exist in all staff)
+      staffMembers = await Staff.find({});
+      console.log(`Fetched ALL staff: ${staffMembers.length}`);
+    } else {
+      if (!ageGroup) {
+        return res.status(400).json({ message: "Age group is required when not applying to all staff" });
+      }
+
+      const ageRanges = ageGroup.split(',').map(r => r.trim());
+      console.log("Age Ranges:", ageRanges);
+
+      // Create age conditions WITHOUT companyId
+      const conditions = ageRanges.map(range => {
+        const [minA, maxA] = range.split('-');
+        return { 
+          age: { $gte: parseInt(minA), $lte: parseInt(maxA) } 
+        };
+      });
+
+      // Fetch staff by age only
+      staffMembers = await Staff.find({ $or: conditions });
+      console.log(`Fetched Staff by age: ${staffMembers.length}`);
+    }
+
+    if (staffMembers.length === 0) {
+      console.log("No staff found");
+      
+      // Debug information
+      const sampleStaff = await Staff.find({}, 'name age').limit(5);
+      return res.status(404).json({ 
+        message: "No staff found for the given criteria",
+        debug: {
+          totalStaff: await Staff.countDocuments(),
+          sampleStaff: sampleStaff.map(s => ({ name: s.name, age: s.age })),
+          requestedAgeGroup: ageGroup
+        }
+      });
+    }
+
+    // Step 3 → Validate diagnostics
+    const diagnosticIds = diagnostics.map(d => d.diagnosticId);
+    console.log("Diagnostic IDs:", diagnosticIds);
+
+    const diagnosticDocs = await Diagnostic.find({ _id: { $in: diagnosticIds } }).populate("scans");
+
+    console.log("Diagnostics Found:", diagnosticDocs.length);
+
+    // Prepare company scans array to collect all assigned scans
+    const companyScansToAdd = [];
+    // New: Collect unique diagnostic IDs for company
+    const companyDiagnosticsToAdd = [];
+
+    // Step 4 → Loop through staff and assign scans
+    for (const staff of staffMembers) {
+      console.log("\n-------------------------------");
+      console.log("STAFF:", staff.name, staff._id, "Age:", staff.age);
+
+      let updated = false;
+
+      for (const diag of diagnostics) {
+        console.log("Processing Diagnostic:", diag.diagnosticId);
+
+        const diagDoc = diagnosticDocs.find(d => d._id.toString() === diag.diagnosticId);
+        if (!diagDoc) {
+          console.log("❌ Diagnostic NOT FOUND:", diag.diagnosticId);
+          continue;
+        }
+
+        console.log("Selected Scans From FE:", diag.scanIds);
+
+        const selectedScans = diag.scanIds || [];
+
+        // Add diagnostic to company diagnostics array (if company exists)
+        if (company) {
+          const diagnosticExistsInCompany = companyDiagnosticsToAdd.some(d => 
+            d.diagnosticId.toString() === diagDoc._id.toString()
+          );
+
+          if (!diagnosticExistsInCompany) {
+            companyDiagnosticsToAdd.push({
+              diagnosticId: diagDoc._id,
+              diagnosticName: diagDoc.name,
+              diagnosticImage: diagDoc.image,
+              assignedAt: new Date()
+            });
+          }
+        }
+
+        for (const scanObj of selectedScans) {
+          console.log("Scan Object From FE:", scanObj);
+
+          const matchedScan = await Xray.findById(scanObj.scanId);
+
+          if (!matchedScan) {
+            console.log("❌ Scan NOT FOUND in DB:", scanObj.scanId);
+            continue;
+          }
+
+          console.log("Matched DB Scan:", matchedScan.title);
+
+          // Initialize myScans array if it doesn't exist
+          if (!staff.myScans) {
+            staff.myScans = [];
+          }
+
+          // Check if scan already exists in staff
+          const existsInStaff = staff.myScans.some(s =>
+            s.diagnosticId && s.diagnosticId.toString() === diagDoc._id.toString() &&
+            s.scanId && s.scanId.toString() === matchedScan._id.toString()
+          );
+
+          if (existsInStaff) {
+            console.log("⚠️ Already Assigned to Staff → Skipping");
+          } else {
+            console.log("✅ Adding Scan to Staff:", matchedScan.title);
+
+            const scanData = {
+              diagnosticId: diagDoc._id,
+              diagnosticName: diagDoc.name,
+              scanId: matchedScan._id,
+              title: matchedScan.title,
+              price: matchedScan.price,
+              preparation: matchedScan.preparation,
+              reportTime: matchedScan.reportTime,
+              image: matchedScan.image,
+              assignedAt: new Date()
+            };
+
+            // Add companyId if company exists
+            if (company) {
+              scanData.companyId = company._id;
+            }
+
+            staff.myScans.push(scanData);
+            updated = true;
+          }
+
+          // Collect scan for company if company exists
+          if (company) {
+            const scanExistsInCompany = companyScansToAdd.some(s =>
+              s.diagnosticId && s.diagnosticId.toString() === diagDoc._id.toString() &&
+              s.scanId && s.scanId.toString() === matchedScan._id.toString()
+            );
+
+            if (!scanExistsInCompany) {
+              companyScansToAdd.push({
+                diagnosticId: diagDoc._id,
+                diagnosticName: diagDoc.name,
+                scanId: matchedScan._id,
+                title: matchedScan.title,
+                price: matchedScan.price,
+                preparation: matchedScan.preparation,
+                reportTime: matchedScan.reportTime,
+                image: matchedScan.image,
+                totalStaffAssigned: staffMembers.length,
+                assignedAt: new Date()
+              });
+            }
+          }
+        }
+      }
+
+      if (updated) {
+        console.log("💾 Saving staff:", staff.name);
+        await staff.save();
+      } else {
+        console.log("⚠️ No new scans added for staff:", staff.name);
+      }
+    }
+
+    // Step 5 → Add scans and diagnostics to company if company exists
+    if (company) {
+      console.log("\n===== Adding Data to Company =====");
+      
+      // 5.1 Add diagnostics to company diagnostics array
+      if (companyDiagnosticsToAdd.length > 0) {
+        console.log(`Adding ${companyDiagnosticsToAdd.length} unique diagnostics to company`);
+        
+        // Initialize company.diagnostics array if it doesn't exist
+        if (!company.diagnostics) {
+          company.diagnostics = [];
+        }
+        
+        for (const diagToAdd of companyDiagnosticsToAdd) {
+          // Check if diagnostic already exists in company
+          const existsInCompany = company.diagnostics.some(d =>
+            d.diagnosticId && d.diagnosticId.toString() === diagToAdd.diagnosticId.toString()
+          );
+          
+          if (!existsInCompany) {
+            company.diagnostics.push(diagToAdd);
+            console.log("✅ Added Diagnostic to Company:", diagToAdd.diagnosticName);
+          } else {
+            console.log("⚠️ Diagnostic already exists in Company:", diagToAdd.diagnosticName);
+          }
+        }
+      }
+      
+      // 5.2 Add scans to company scans array
+      if (companyScansToAdd.length > 0) {
+        console.log(`Adding ${companyScansToAdd.length} unique scans to company`);
+
+        // Initialize company.scans array if it doesn't exist
+        if (!company.scans) {
+          company.scans = [];
+        }
+
+        for (const scanToAdd of companyScansToAdd) {
+          // Check if scan already exists in company
+          const existsInCompany = company.scans.some(s =>
+            s.diagnosticId && s.diagnosticId.toString() === scanToAdd.diagnosticId.toString() &&
+            s.scanId && s.scanId.toString() === scanToAdd.scanId.toString()
+          );
+
+          if (!existsInCompany) {
+            company.scans.push(scanToAdd);
+            console.log("✅ Added Scan to Company:", scanToAdd.title);
+          } else {
+            console.log("⚠️ Already exists in Company:", scanToAdd.title);
+            
+            // Update total staff count for existing scan
+            const existingScan = company.scans.find(s =>
+              s.diagnosticId && s.diagnosticId.toString() === scanToAdd.diagnosticId.toString() &&
+              s.scanId && s.scanId.toString() === scanToAdd.scanId.toString()
+            );
+            
+            if (existingScan) {
+              existingScan.totalStaffAssigned = (existingScan.totalStaffAssigned || 0) + staffMembers.length;
+            }
+          }
+        }
+      }
+
+      await company.save();
+      console.log("💾 Company data updated (diagnostics and scans)");
+    }
+
+    return res.status(200).json({ 
+      message: "Scans assigned successfully.",
+      staffCount: staffMembers.length,
+      companyDiagnosticsAdded: companyDiagnosticsToAdd.length,
+      companyScansAdded: companyScansToAdd.length,
+      companyName: company ? company.companyName : "Not specified",
+      assignedStaffSample: staffMembers.slice(0, 3).map(s => ({ name: s.name, age: s.age }))
+    });
+
+  } catch (error) {
+    console.error("Error in addScansToStaffByAgeGroup:", error);
+    return res.status(500).json({ 
+      message: "Internal server error", 
+      error: error.message,
+      stack: error.stack 
+    });
+  }
+};
 
 export const submitSection = async (req, res) => {
   try {
@@ -4458,49 +7245,264 @@ export const getAllTests = async (req, res) => {
 
 export const updateTests = async (req, res) => {
   try {
+    console.log("📥 UPDATE TEST REQUEST RECEIVED");
+    console.log("📝 Request Params:", req.params);
+    console.log("📦 Request Body:", req.body);
+    console.log("🆔 Test ID:", req.params.testId);
+    
     const { testId } = req.params;
-    const updateData = req.body;
+    const {
+      name,
+      price,
+      gender, // NEW: Added gender
+      description,
+      instruction,
+      fastingRequired,
+      homeCollectionAvailable,
+      reportIn24Hrs,
+      reportHour,
+      category,
+      precaution,
+      diagnosticIds
+    } = req.body;
 
+    console.log("🔍 Parsed data from request:");
+    console.log("- Name:", name);
+    console.log("- Price:", price);
+    console.log("- Gender:", gender); // NEW: Log gender
+    console.log("- Description:", description);
+    console.log("- Instruction:", instruction);
+    console.log("- Fasting Required:", fastingRequired);
+    console.log("- Home Collection:", homeCollectionAvailable);
+    console.log("- Report in 24Hrs:", reportIn24Hrs);
+    console.log("- Report Hour:", reportHour);
+    console.log("- Category:", category);
+    console.log("- Precaution:", precaution);
+    console.log("- Diagnostic IDs:", diagnosticIds);
+    console.log("- Diagnostic IDs Type:", typeof diagnosticIds);
+
+    // Trouver le test existant
+    console.log("🔎 Looking for test with ID:", testId);
     const test = await Test.findById(testId);
+    
     if (!test) {
-      return res.status(404).json({ message: "Test not found" });
+      console.log("❌ Test not found with ID:", testId);
+      return res.status(404).json({ 
+        success: false,
+        message: "Test not found" 
+      });
+    }
+    
+    console.log("✅ Test found:", test.name);
+
+    // Validate gender if provided
+    if (gender !== undefined && !['Male', 'Female', 'Both'].includes(gender)) {
+      console.log("❌ Invalid gender value:", gender);
+      return res.status(400).json({ 
+        success: false,
+        message: "Invalid gender value. Must be Male, Female, or Both" 
+      });
     }
 
-    // Update fields dynamically
-    Object.keys(updateData).forEach(key => {
-      test[key] = updateData[key];
+    // Sauvegarder les anciens diagnostics pour cleanup
+    const oldDiagnosticIds = test.diagnostics || [];
+    console.log("📊 Old Diagnostic IDs:", oldDiagnosticIds);
+
+    // Mettre à jour les champs de base
+    console.log("🔄 Updating basic fields...");
+    if (name !== undefined) {
+      console.log("Updating name:", test.name, "->", name);
+      test.name = name;
+    }
+    if (price !== undefined) {
+      console.log("Updating price:", test.price, "->", price);
+      test.price = price;
+    }
+    if (gender !== undefined) { // NEW: Update gender
+      console.log("Updating gender:", test.gender, "->", gender);
+      test.gender = gender;
+    }
+    if (description !== undefined) {
+      console.log("Updating description");
+      test.description = description;
+    }
+    if (instruction !== undefined) {
+      console.log("Updating instruction");
+      test.instruction = instruction;
+    }
+    if (fastingRequired !== undefined) {
+      console.log("Updating fastingRequired:", test.fastingRequired, "->", fastingRequired);
+      test.fastingRequired = fastingRequired;
+    }
+    if (homeCollectionAvailable !== undefined) {
+      console.log("Updating homeCollectionAvailable:", test.homeCollectionAvailable, "->", homeCollectionAvailable);
+      test.homeCollectionAvailable = homeCollectionAvailable;
+    }
+    if (reportIn24Hrs !== undefined) {
+      console.log("Updating reportIn24Hrs:", test.reportIn24Hrs, "->", reportIn24Hrs);
+      test.reportIn24Hrs = reportIn24Hrs;
+    }
+    if (reportHour !== undefined) {
+      console.log("Updating reportHour:", test.reportHour, "->", reportHour);
+      test.reportHour = reportHour;
+    }
+    if (category !== undefined) {
+      console.log("Updating category:", test.category, "->", category);
+      test.category = category || 'General';
+    }
+    if (precaution !== undefined) {
+      console.log("Updating precaution");
+      test.precaution = precaution;
+    }
+
+    // Gérer les diagnostics si fournis
+    if (diagnosticIds !== undefined) {
+      console.log("🩺 Handling diagnostics...");
+      // Convertir en tableau si nécessaire
+      const newDiagnosticIds = Array.isArray(diagnosticIds) ? diagnosticIds : [];
+      console.log("📋 New Diagnostic IDs:", newDiagnosticIds);
+      console.log("📋 New Diagnostic IDs length:", newDiagnosticIds.length);
+
+      // 1) Retirer ce test des anciens diagnostics
+      if (oldDiagnosticIds.length > 0) {
+        console.log("🗑️ Removing test from old diagnostics...");
+        console.log("Old IDs to remove from:", oldDiagnosticIds);
+        const removeResult = await Diagnostic.updateMany(
+          { _id: { $in: oldDiagnosticIds } },
+          { $pull: { tests: test._id } }
+        );
+        console.log("✅ Removed from diagnostics. Result:", removeResult);
+      }
+
+      // 2) Ajouter ce test aux nouveaux diagnostics
+      if (newDiagnosticIds.length > 0) {
+        console.log("➕ Adding test to new diagnostics...");
+        console.log("New IDs to add to:", newDiagnosticIds);
+        const addResult = await Diagnostic.updateMany(
+          { _id: { $in: newDiagnosticIds } },
+          { $addToSet: { tests: test._id } }
+        );
+        console.log("✅ Added to diagnostics. Result:", addResult);
+      }
+
+      // 3) Mettre à jour la référence dans le test
+      console.log("🔄 Updating test diagnostics reference:", newDiagnosticIds);
+      test.diagnostics = newDiagnosticIds;
+    } else {
+      console.log("ℹ️ No diagnosticIds provided in request");
+    }
+
+    console.log("💾 Saving test to database...");
+    const updatedTest = await test.save();
+    console.log("✅ Test saved successfully");
+
+    // Populer les diagnostics pour la réponse
+    console.log("🔍 Populating diagnostics for response...");
+    const populatedTest = await Test.findById(updatedTest._id)
+      .populate("diagnostics", "name _id");
+    
+    console.log("✅ Final populated test:", {
+      id: populatedTest._id,
+      name: populatedTest.name,
+      gender: populatedTest.gender, // NEW: Log gender
+      diagnosticsCount: populatedTest.diagnostics?.length,
+      diagnostics: populatedTest.diagnostics?.map(d => ({ id: d._id, name: d.name }))
     });
 
-    await test.save();
-
+    console.log("🎉 Sending success response...");
     return res.status(200).json({
+      success: true,
       message: "Test updated successfully",
-      test
+      test: populatedTest
     });
+
   } catch (err) {
-    console.error("❌ Error updating test:", err);
-    return res.status(500).json({ message: "Server error" });
+    console.error("❌ ERROR in updateTests:");
+    console.error("Error Message:", err.message);
+    console.error("Error Stack:", err.stack);
+    console.error("Full Error Object:", err);
+    
+    return res.status(500).json({ 
+      success: false,
+      message: "Server error",
+      error: err.message 
+    });
   }
 };
-
 
 
 export const deleteTests = async (req, res) => {
   try {
     const { testId } = req.params;
 
+    // 1️⃣ Check if the test exists in the Test collection
     const test = await Test.findById(testId);
     if (!test) {
       return res.status(404).json({ message: "Test not found" });
     }
 
+    // 2️⃣ Delete the test from the Test collection
     await Test.findByIdAndDelete(testId);
+    console.log(`Test with ID: ${testId} deleted successfully.`);
 
+    // 3️⃣ Remove the test from the Diagnostic schema's tests array
+    const diagnosticUpdateResult = await Diagnostic.updateMany(
+      { tests: testId }, // Searching for the ObjectId in the `tests` array
+      { $pull: { tests: testId } } // Removing the testId from the `tests` array
+    );
+
+    if (diagnosticUpdateResult.modifiedCount > 0) {
+      console.log(`Test with ID: ${testId} removed from Diagnostics.`);
+    } else {
+      console.log(`Test with ID: ${testId} not found in any Diagnostic's tests array.`);
+    }
+
+    // 4️⃣ Remove the test from the Staff schema's myTests array
+    const staffUpdateResult = await Staff.updateMany(
+      { "myTests.testId": testId },
+      { $pull: { myTests: { testId } } }
+    );
+
+    if (staffUpdateResult.modifiedCount > 0) {
+      console.log(`Test with ID: ${testId} removed from Staff myTests.`);
+    } else {
+      console.log(`Test with ID: ${testId} not found in any Staff's myTests.`);
+    }
+
+    // 5️⃣ Return success response
     return res.status(200).json({
-      message: "Test deleted successfully"
+      message: "Test deleted successfully and references removed from Diagnostic and Staff schemas."
     });
+    
   } catch (err) {
     console.error("❌ Error deleting test:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+
+
+export const deleteScan = async (req, res) => {
+  try {
+    const { scanId } = req.params;
+
+    // Validate the ID
+    if (!scanId || !mongoose.Types.ObjectId.isValid(scanId)) {
+      return res.status(400).json({ message: "Valid scanId is required" });
+    }
+
+    const scan = await Xray.findById(scanId);
+    if (!scan) {
+      return res.status(404).json({ message: "Scan/Xray not found" });
+    }
+
+    await Xray.findByIdAndDelete(scanId);
+
+    return res.status(200).json({
+      message: "Scan/Xray deleted successfully"
+    });
+  } catch (err) {
+    console.error("❌ Error deleting Scan/Xray:", err);
     return res.status(500).json({ message: "Server error" });
   }
 };
@@ -4513,45 +7515,94 @@ export const deleteTests = async (req, res) => {
 
 
 export const createPackage = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const {
       name,
       price,
+      gender, // NEW: Get gender from request
       doctorInfo,
       totalTestsIncluded,
       description,
       precautions,
-      includedTests
+      includedTests,
+      diagnosticIds
     } = req.body;
 
-    if (!name || !price || !totalTestsIncluded || !includedTests?.length) {
-      return res.status(400).json({ message: "Required fields missing" });
+    console.log("📦 Package creation request body:", req.body); // Debug log
+
+    // Validate gender value
+    const validGenders = ['Male', 'Female', 'Both'];
+    if (!validGenders.includes(gender)) {
+      return res.status(400).json({ 
+        message: "Invalid gender value. Must be one of: Male, Female, Both" 
+      });
     }
 
+    // Create new package with gender
     const newPackage = new Package({
       name,
       price,
+      gender, // NEW: Include gender
       doctorInfo,
       totalTestsIncluded,
       description,
       precautions,
-      includedTests
+      includedTests,
+      diagnostics: diagnosticIds
     });
 
-    const saved = await newPackage.save();
+    console.log("💾 Saving package with data:", {
+      name,
+      price,
+      gender,
+      totalTestsIncluded,
+      includedTestsCount: includedTests?.length,
+      diagnosticIdsCount: diagnosticIds?.length
+    });
+
+    const savedPackage = await newPackage.save({ session });
+
+    // Update each diagnostic center with the new package ID
+    if (diagnosticIds && diagnosticIds.length > 0) {
+      const updateResult = await Diagnostic.updateMany(
+        { _id: { $in: diagnosticIds } },
+        { $addToSet: { packages: savedPackage._id } }, // Use $addToSet to avoid duplicates
+        { session }
+      );
+      console.log(`✅ Linked package to ${updateResult.modifiedCount} diagnostics`);
+    }
+
+    await session.commitTransaction();
+    console.log("✅ Transaction committed successfully");
+
+    // Populate the response with diagnostic details
+    const populatedPackage = await Package.findById(savedPackage._id)
+      .populate("diagnostics", "name email phone address");
+
+    console.log("🎉 Package created successfully:", populatedPackage._id);
 
     res.status(201).json({
+      success: true,
       message: "Test package created successfully",
-      package: saved
+      package: populatedPackage
     });
 
   } catch (err) {
     console.error("❌ Error creating package:", err);
-    res.status(500).json({ message: "Server error" });
+    await session.abortTransaction();
+    
+    res.status(500).json({ 
+      success: false,
+      message: "Server error",
+      error: err.message 
+    });
+  } finally {
+    session.endSession();
   }
 };
-
-
 export const createPackageForDiagnostic = async (req, res) => {
   try {
     const { diagnosticId } = req.params;
@@ -4613,9 +7664,6 @@ export const updatePackageForDiagnostic = async (req, res) => {
       includedTests,
     } = req.body;
 
-    if (!name || !price || !totalTestsIncluded || !includedTests?.length) {
-      return res.status(400).json({ message: "Required fields missing" });
-    }
 
     // Find and update the package
     const updatedPackage = await Package.findOneAndUpdate(
@@ -4700,63 +7748,148 @@ export const getPackagesForDiagnostic = async (req, res) => {
 export const updatePackage = async (req, res) => {
   try {
     const { packageId } = req.params;
+    const {
+      name,
+      price,
+      gender, // NEW: Added gender field
+      doctorInfo,
+      totalTestsIncluded,
+      description,
+      precautions,
+      includedTests,
+      diagnosticIds,
+      diagnostics, // handle frontend key
+    } = req.body;
 
-    const updatedFields = {
-      name: req.body.name,
-      price: req.body.price,
-      doctorInfo: req.body.doctorInfo,
-      totalTestsIncluded: req.body.totalTestsIncluded,
-      description: req.body.description,
-      precautions: req.body.precautions,
-      includedTests: req.body.includedTests
-    };
+    // Combine both (frontend might send either)
+    const diagnosticList = diagnosticIds || diagnostics || [];
 
-    const updatedPackage = await Package.findByIdAndUpdate(
-      packageId,
-      { $set: updatedFields },
-      { new: true }
-    );
-
-    if (!updatedPackage) {
-      return res.status(404).json({ message: "Package not found" });
+    // Validate gender if provided
+    if (gender && !['Male', 'Female', 'Both'].includes(gender)) {
+      return res.status(400).json({ 
+        success: false,
+        message: "Invalid gender value. Must be one of: Male, Female, Both" 
+      });
     }
 
+    // Find the package
+    const existingPackage = await Package.findById(packageId);
+    if (!existingPackage) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Package not found" 
+      });
+    }
+
+    // Update fields - including gender
+    if (name !== undefined) existingPackage.name = name;
+    if (price !== undefined) existingPackage.price = price;
+    if (gender !== undefined) existingPackage.gender = gender; // NEW: Update gender
+    if (doctorInfo !== undefined) existingPackage.doctorInfo = doctorInfo;
+    if (totalTestsIncluded !== undefined) existingPackage.totalTestsIncluded = totalTestsIncluded;
+    if (description !== undefined) existingPackage.description = description;
+    if (precautions !== undefined) existingPackage.precautions = precautions;
+    if (includedTests !== undefined) existingPackage.includedTests = includedTests;
+
+    // ✅ Update diagnostic relations
+    if (diagnosticList.length > 0) {
+      // Remove this package from all old diagnostics
+      const oldDiagnosticIds = existingPackage.diagnostics || [];
+      if (oldDiagnosticIds.length > 0) {
+        await Diagnostic.updateMany(
+          { _id: { $in: oldDiagnosticIds } },
+          { $pull: { packages: existingPackage._id } }
+        );
+      }
+
+      // Add this package to all new diagnostics
+      await Diagnostic.updateMany(
+        { _id: { $in: diagnosticList } },
+        { $push: { packages: existingPackage._id } }
+      );
+
+      existingPackage.diagnostics = diagnosticList;
+    } else if (diagnosticList.length === 0 && existingPackage.diagnostics?.length > 0) {
+      // If empty array provided, remove from all diagnostics
+      await Diagnostic.updateMany(
+        { _id: { $in: existingPackage.diagnostics } },
+        { $pull: { packages: existingPackage._id } }
+      );
+      existingPackage.diagnostics = [];
+    }
+
+    // Save updated package
+    const updatedPackage = await existingPackage.save();
+
+    // Populate diagnostic details for response
+    const populatedPackage = await Package.findById(updatedPackage._id)
+      .populate("diagnostics", "name email phone address");
+
     res.status(200).json({
+      success: true,
       message: "Package updated successfully",
-      package: updatedPackage
+      package: populatedPackage,
     });
   } catch (error) {
     console.error("❌ Error updating package:", error);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ 
+      success: false,
+      message: "Server error",
+      error: error.message 
+    });
   }
 };
-
 
 
 export const deletePackage = async (req, res) => {
   try {
     const { packageId } = req.params;
 
+    // 1️⃣ Find and delete the package from the Package collection
     const deletedPackage = await Package.findByIdAndDelete(packageId);
 
     if (!deletedPackage) {
       return res.status(404).json({ message: "Package not found" });
     }
 
+    // 2️⃣ Remove references to this package in Staff's myPackages array (Package is stored as ObjectId)
+    await Staff.updateMany(
+      { "myPackages.packageId": packageId },  // Searching for the ObjectId in the `myPackages` array
+      { $pull: { myPackages: { packageId: packageId } } }  // Removing the specific package from the array
+    );
+    console.log(`Package with ID: ${packageId} removed from Staff.`);
+
+    // 3️⃣ Remove references to this package in Diagnostic's packages array (Package is stored as ObjectId)
+    await Diagnostic.updateMany(
+      { "packages": packageId },  // Searching for the ObjectId in the `packages` array
+      { $pull: { packages: packageId } }  // Removing the specific package from the array
+    );
+    console.log(`Package with ID: ${packageId} removed from Diagnostics.`);
+
+    // 4️⃣ Send success response
     res.status(200).json({
-      message: "Package deleted successfully",
+      message: "Package deleted successfully and references removed from Staff and Diagnostics.",
       package: deletedPackage
     });
+
   } catch (error) {
     console.error("❌ Error deleting package:", error);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
 
+
 export const getAllPackages = async (req, res) => {
   try {
-    const packages = await Package.find().sort({ createdAt: -1 });
+    const packages = await Package.find()
+      .populate({
+        path: 'diagnostics',
+        select: 'name address contact email', // ✅ Jo fields chahiye woh specify karo
+        options: { strictPopulate: false } // ✅ Agar koi diagnostic nahi hai toh error na de
+      })
+      .sort({ createdAt: -1 });
+
     res.status(200).json({
       message: 'All test packages fetched successfully',
       packages
@@ -4986,27 +8119,82 @@ export const getAllXrays = async (req, res) => {
 
 export const updateXray = async (req, res) => {
   try {
-    const { id } = req.params; // assuming id param for Xray document
-    const updateData = req.body;
+    const { id } = req.params;
+    const {
+      title,
+      price,
+      preparation,
+      reportTime,
+      diagnosticIds,
+      gender
+    } = req.body;
 
-    if (!id) {
-      return res.status(400).json({ message: "X-ray ID is required." });
+    console.log("Received data:", req.body);
+
+    const existingXray = await Xray.findById(id);
+    if (!existingXray) {
+      return res.status(404).json({ success: false, message: "X-ray not found." });
     }
 
-    // Find and update the Xray document
-    const updatedXray = await Xray.findByIdAndUpdate(id, updateData, { new: true });
+    // Update basic fields
+    if (title !== undefined) existingXray.title = title;
+    if (price !== undefined) existingXray.price = price;
+     if (gender !== undefined) existingXray.gender = gender; // NEW: Update gend
+    if (preparation !== undefined) existingXray.preparation = preparation;
+    if (reportTime !== undefined) existingXray.reportTime = reportTime;
 
-    if (!updatedXray) {
-      return res.status(404).json({ message: "X-ray not found." });
+    // Handle diagnostics
+    let diagnosticList = diagnosticIds || [];
+
+    console.log("Processed diagnosticList:", diagnosticList);
+
+    // Update relations if diagnosticList is valid
+    if (Array.isArray(diagnosticList) && diagnosticList.length > 0) {
+      // Remove old references
+      await Diagnostic.updateMany(
+        { scans: existingXray._id },
+        { $pull: { scans: existingXray._id } }
+      );
+
+      // Add new references
+      await Diagnostic.updateMany(
+        { _id: { $in: diagnosticList } },
+        { $addToSet: { scans: existingXray._id } }
+      );
+
+      // Update Xray document
+      existingXray.diagnostics = diagnosticList;
+    } else if (Array.isArray(diagnosticList) && diagnosticList.length === 0) {
+      // Clear all diagnostics
+      await Diagnostic.updateMany(
+        { scans: existingXray._id },
+        { $pull: { scans: existingXray._id } }
+      );
+      existingXray.diagnostics = [];
     }
 
-    res.status(200).json({ message: "X-ray updated successfully.", xray: updatedXray });
-  } catch (err) {
-    console.error("❌ Error updating X-ray:", err);
-    res.status(500).json({ message: "Server error" });
+    const updatedXray = await existingXray.save();
+
+    const populatedXray = await Xray.findById(updatedXray._id)
+      .populate("diagnostics", "name _id");
+
+    console.log("Updated Xray:", populatedXray);
+
+    res.status(200).json({
+      success: true,
+      message: "X-ray updated successfully",
+      xray: populatedXray
+    });
+  } catch (error) {
+    console.error("Error updating X-ray:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error", 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 };
-
 
 
 
@@ -5014,22 +8202,43 @@ export const deleteXray = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Check if the id is provided
     if (!id) {
       return res.status(400).json({ message: "X-ray ID is required." });
     }
 
+    // 1️⃣ Find and delete the X-ray from the Xray collection
     const deletedXray = await Xray.findByIdAndDelete(id);
 
     if (!deletedXray) {
       return res.status(404).json({ message: "X-ray not found." });
     }
 
-    res.status(200).json({ message: "X-ray deleted successfully." });
+    // 2️⃣ Remove the X-ray from all Staff's myScans array where scanId matches
+    await Staff.updateMany(
+      { "myScans.scanId": id }, // Looking for scanId in the `myScans` array
+      { $pull: { myScans: { scanId: id } } } // Remove the entry where scanId matches
+    );
+    console.log(`X-ray with ID: ${id} removed from Staff's myScans.`);
+
+    // 3️⃣ Remove the X-ray from all Diagnostic's scans array where scanId matches
+    await Diagnostic.updateMany(
+      { "scans": id }, // Looking for the ObjectId in the `scans` array
+      { $pull: { scans: id } } // Remove the X-ray reference from the `scans` array
+    );
+    console.log(`X-ray with ID: ${id} removed from Diagnostics' scans.`);
+
+    // 4️⃣ Send success response
+    return res.status(200).json({
+      message: "X-ray deleted successfully and references removed from Staff and Diagnostics."
+    });
+
   } catch (err) {
     console.error("❌ Error deleting X-ray:", err);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error", error: err.message });
   }
 };
+
 
 
 // 🔍 Get single X-ray by xrayId
@@ -5062,7 +8271,7 @@ export const createDiagnostic = async (req, res) => {
       location, country, state, city, pincode,
       visitType, homeCollectionSlots, centerVisitSlots,
       contactPersons, tests, packages, scans, network,
-      description,
+      description, branches // ✅ Added branches
     } = req.body;
 
     console.log("✅ Diagnostic Center Details:", {
@@ -5073,6 +8282,7 @@ export const createDiagnostic = async (req, res) => {
       centerType,
       visitType,
       description,
+      branchesCount: branches ? branches.length : 0
     });
 
     // ✅ Parse diagnostic fields or use default slots for diagnostic center
@@ -5080,6 +8290,7 @@ export const createDiagnostic = async (req, res) => {
     const parsedTests = parseJsonFieldDiagnostic(tests, "tests");
     const parsedPackages = parseJsonFieldDiagnostic(packages, "packages");
     const parsedScans = parseJsonFieldDiagnostic(scans, "scans");
+    const parsedBranches = parseJsonFieldDiagnostic(branches, "branches"); // ✅ Parse branches
 
     const parsedHomeSlots = homeCollectionSlots
       ? parseJsonFieldDiagnostic(homeCollectionSlots, "homeCollectionSlots")
@@ -5099,7 +8310,7 @@ export const createDiagnostic = async (req, res) => {
     if (parsedTests.length > 0) {
       const insertedTests = await Test.insertMany(parsedTests);
       testIds = insertedTests.map(t => t._id);
-      console.log("✅ Tests inserted:", insertedTests);
+      console.log("✅ Tests inserted:", insertedTests.length);
     }
 
     // ✅ Insert Packages for Diagnostic Center
@@ -5120,7 +8331,7 @@ export const createDiagnostic = async (req, res) => {
 
       const insertedPackages = await Package.insertMany(pkgDocs);
       packageIds = insertedPackages.map(p => p._id);
-      console.log("✅ Packages inserted:", insertedPackages);
+      console.log("✅ Packages inserted:", insertedPackages.length);
     }
 
     // ✅ Insert Scans for Diagnostic Center
@@ -5134,15 +8345,27 @@ export const createDiagnostic = async (req, res) => {
 
       const insertedScans = await Xray.insertMany(parsedScans);
       scanIds = insertedScans.map(s => s._id);
-      console.log("✅ Scans inserted:", insertedScans);
+      console.log("✅ Scans inserted:", insertedScans.length);
     }
 
-    // 🏥 Create Diagnostic Center Document
+    // 🏥 Create Diagnostic Center Document with Branches
     const diagnostic = new Diagnostic({
-      name, email, password, phone, address,
+      name, 
+      email, 
+      password, 
+      phone, 
+      address,
       image: diagnosticImage,
-      centerType, methodology, pathologyAccredited, gstNumber,
-      centerStrength, location, country, state, city, pincode,
+      centerType, 
+      methodology, 
+      pathologyAccredited, 
+      gstNumber,
+      centerStrength, 
+      location, 
+      country, 
+      state, 
+      city, 
+      pincode,
       visitType,
       homeCollectionSlots: parsedHomeSlots,
       centerVisitSlots: parsedCenterSlots,
@@ -5151,12 +8374,15 @@ export const createDiagnostic = async (req, res) => {
       packages: packageIds,
       scans: scanIds,
       network,
-      description
+      description,
+      branches: parsedBranches, // ✅ Add branches to diagnostic
+      isHeadquarter: true // ✅ Mark as headquarter
     });
 
     const savedDiagnostic = await diagnostic.save();
 
     console.log(`✅ Diagnostic Center saved with ID: ${savedDiagnostic._id}`);
+    console.log(`✅ Branches saved: ${savedDiagnostic.branches.length}`);
 
     // Update related models with the diagnostic center ID
     await Promise.all([
@@ -5184,6 +8410,146 @@ export const createDiagnostic = async (req, res) => {
   }
 };
 
+
+
+// Add new branch to diagnostic center
+export const addBranch = async (req, res) => {
+  try {
+    const { diagnosticId, branchName, email, phone, address, country, state, city, pincode, contactPersons } = req.body;
+
+    console.log("✅ Adding branch to diagnostic:", diagnosticId);
+
+    if (!diagnosticId) {
+      return res.status(400).json({ message: "Diagnostic ID is required" });
+    }
+
+    const diagnostic = await Diagnostic.findById(diagnosticId);
+    if (!diagnostic) {
+      return res.status(404).json({ message: "Diagnostic center not found" });
+    }
+
+    // Create new branch object
+    const newBranch = {
+      branchName,
+      email,
+      phone,
+      address,
+      country,
+      state,
+      city,
+      pincode,
+      contactPersons: contactPersons.map(person => ({
+        ...person,
+        _id: new mongoose.Types.ObjectId()
+      }))
+    };
+
+    // Add branch to diagnostic
+    diagnostic.branches.push(newBranch);
+    await diagnostic.save();
+
+    console.log("✅ Branch added successfully");
+
+    res.status(201).json({
+      message: "Branch added successfully",
+      branch: newBranch,
+      diagnostic
+    });
+
+  } catch (error) {
+    console.error("❌ Error adding branch:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Update branch
+export const updateBranch = async (req, res) => {
+  try {
+    const { branchId } = req.params;
+    const { branchName, email, phone, address, country, state, city, pincode, contactPersons } = req.body;
+
+    console.log("✅ Updating branch:", branchId);
+
+    const diagnostic = await Diagnostic.findOne({ "branches._id": branchId });
+    if (!diagnostic) {
+      return res.status(404).json({ message: "Branch not found" });
+    }
+
+    // Find and update the branch
+    const branch = diagnostic.branches.id(branchId);
+    if (!branch) {
+      return res.status(404).json({ message: "Branch not found" });
+    }
+
+    // Update branch fields
+    branch.branchName = branchName || branch.branchName;
+    branch.email = email || branch.email;
+    branch.phone = phone || branch.phone;
+    branch.address = address || branch.address;
+    branch.country = country || branch.country;
+    branch.state = state || branch.state;
+    branch.city = city || branch.city;
+    branch.pincode = pincode || branch.pincode;
+
+    // Update contact persons
+    if (contactPersons && Array.isArray(contactPersons)) {
+      branch.contactPersons = contactPersons.map(person => ({
+        ...person,
+        _id: person._id || new mongoose.Types.ObjectId()
+      }));
+    }
+
+    await diagnostic.save();
+
+    console.log("✅ Branch updated successfully");
+
+    res.status(200).json({
+      message: "Branch updated successfully",
+      branch,
+      diagnostic
+    });
+
+  } catch (error) {
+    console.error("❌ Error updating branch:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Delete branch
+export const deleteBranch = async (req, res) => {
+  try {
+    const { branchId } = req.params;
+
+    console.log("✅ Deleting branch:", branchId);
+
+    const diagnostic = await Diagnostic.findOne({ "branches._id": branchId });
+    if (!diagnostic) {
+      return res.status(404).json({ message: "Branch not found" });
+    }
+
+    // Remove the branch
+    diagnostic.branches = diagnostic.branches.filter(
+      branch => branch._id.toString() !== branchId
+    );
+
+    await diagnostic.save();
+
+    console.log("✅ Branch deleted successfully");
+
+    res.status(200).json({
+      message: "Branch deleted successfully",
+      diagnostic
+    });
+
+  } catch (error) {
+    console.error("❌ Error deleting branch:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
+
+
 // Helper functions
 // ✅ Parse stringified JSON fields (for diagnostics)
 const parseJsonFieldDiagnostic = (field, fieldName) => {
@@ -5199,16 +8565,16 @@ const parseJsonFieldDiagnostic = (field, fieldName) => {
   return field;
 };
 
-// ✅ Default Slot Generator for Diagnostic Centers (9 AM – 11 PM, gap 30 mins, 7 days)
 const generateDefaultSlotsDiagnostic = () => {
   const slots = [];
+  
   for (let i = 0; i < 7; i++) {
     const dateObj = moment().add(i, "days");
-    const day = dateObj.format("dddd");        // e.g., Wednesday
-    const date = dateObj.format("YYYY-MM-DD"); // e.g., 2025-08-20
+    const day = dateObj.format("dddd");
+    const date = dateObj.format("YYYY-MM-DD");
 
-    let startTime = moment(date + " 09:00", "YYYY-MM-DD HH:mm");
-    const endTime = moment(date + " 23:00", "YYYY-MM-DD HH:mm");
+    let startTime = moment(date + " 07:00", "YYYY-MM-DD HH:mm");
+    const endTime = moment(date + " 21:00", "YYYY-MM-DD HH:mm"); // 9 PM
 
     while (startTime.isBefore(endTime)) {
       slots.push({
@@ -5217,11 +8583,14 @@ const generateDefaultSlotsDiagnostic = () => {
         timeSlot: startTime.format("HH:mm"),
         isBooked: false,
       });
-      startTime.add(30, "minutes"); // ⏰ 30 mins gap
+
+      startTime.add(30, "minutes"); // 30 min gap
     }
   }
+
   return slots;
 };
+
 
 
 // ✅ Countdown Cron Job: Remind users daily about the upcoming diagnostic slot generation
@@ -5285,17 +8654,116 @@ export const addDiagnosticSlot = async (req, res) => {
 };
 
 
+// Add multiple slots at once
+export const addDiagnosticMultipleSlots = async (req, res) => {
+  try {
+    const { diagnosticId } = req.params;
+    const { slots } = req.body;
+
+    if (!diagnosticId || !slots || !Array.isArray(slots) || slots.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "diagnosticId and slots array are required"
+      });
+    }
+
+    const diagnostic = await Diagnostic.findById(diagnosticId);
+    if (!diagnostic) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Diagnostic center not found" 
+      });
+    }
+
+    let addedCount = 0;
+    let duplicateCount = 0;
+    let errors = [];
+
+    // Process each slot
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i];
+      
+      if (!slot.slotType || !slot.day || !slot.date || !slot.timeSlot) {
+        errors.push({
+          index: i,
+          error: "Missing required fields (slotType, day, date, timeSlot)"
+        });
+        continue;
+      }
+
+      const field = slot.slotType === 'home' ? 'homeCollectionSlots' : 'centerVisitSlots';
+      
+      // Check if slot already exists
+      const exists = diagnostic[field].some(s => 
+        s.day === slot.day && 
+        s.date === slot.date && 
+        s.timeSlot === slot.timeSlot
+      );
+
+      if (exists) {
+        duplicateCount++;
+        continue;
+      }
+
+      // Add new slot
+      diagnostic[field].push({
+        day: slot.day,
+        date: slot.date,
+        timeSlot: slot.timeSlot,
+        isBooked: slot.isBooked || false,
+        gender: slot.gender || "Both"
+      });
+      
+      addedCount++;
+    }
+
+    // Save if any slots were added
+    if (addedCount > 0) {
+      await diagnostic.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Added ${addedCount} slots, ${duplicateCount} duplicates skipped`,
+      summary: {
+        totalSlots: slots.length,
+        added: addedCount,
+        duplicates: duplicateCount,
+        errors: errors.length
+      },
+      errors: errors.length > 0 ? errors : undefined,
+      diagnostic
+    });
+
+  } catch (error) {
+    console.error("❌ Error adding multiple slots:", error);
+    return res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
+  }
+};
+
 
 
 export const updateDiagnosticSlot = async (req, res) => {
   try {
     const { diagnosticId } = req.params;
-    const { slotType, day, date, timeSlot, newSlot } = req.body;
+    const { slotType, slotId, newSlot } = req.body;
     const { newDay, newDate, newTimeSlot, isBooked } = newSlot || {};
 
-    if (!diagnosticId || !slotType || !day || !date || !timeSlot || !newSlot) {
+    // Validation को modify करें
+    if (!diagnosticId || !slotType || !slotId || !newSlot) {
       return res.status(400).json({
-        message: "diagnosticId, slotType, day, date, timeSlot, and newSlot are required."
+        message: "diagnosticId, slotType, slotId, and newSlot are required."
+      });
+    }
+
+    // newSlot के fields check करें
+    if (!newDay || !newDate || !newTimeSlot) {
+      return res.status(400).json({
+        message: "newDay, newDate, and newTimeSlot are required in newSlot object."
       });
     }
 
@@ -5305,18 +8773,29 @@ export const updateDiagnosticSlot = async (req, res) => {
     }
 
     const field = slotType === 'home' ? 'homeCollectionSlots' : 'centerVisitSlots';
-    const updated = diagnostic[field].map(s => {
-      if (s.day === day && s.date === date && s.timeSlot === timeSlot) {
-        return { day: newDay, date: newDate, timeSlot: newTimeSlot, isBooked: isBooked ?? s.isBooked };
+    
+    // slotId के basis पर search करें
+    const slotFound = diagnostic[field].find(s => s._id.toString() === slotId);
+    
+    if (!slotFound) {
+      return res.status(404).json({ message: "Slot not found with provided slotId." });
+    }
+
+    // Update slot using slotId
+    const updatedSlots = diagnostic[field].map(s => {
+      if (s._id.toString() === slotId) {
+        return { 
+          ...s._doc, // यह important है
+          day: newDay, 
+          date: newDate, 
+          timeSlot: newTimeSlot, 
+          isBooked: isBooked ?? s.isBooked 
+        };
       }
       return s;
     });
 
-    if (JSON.stringify(updated) === JSON.stringify(diagnostic[field])) {
-      return res.status(404).json({ message: "No matching slot found to update." });
-    }
-
-    diagnostic[field] = updated;
+    diagnostic[field] = updatedSlots;
     await diagnostic.save();
 
     return res.status(200).json({
@@ -5328,7 +8807,6 @@ export const updateDiagnosticSlot = async (req, res) => {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 
 
 export const deleteDiagnosticSlot = async (req, res) => {
@@ -5436,32 +8914,16 @@ export const getDiagnosticById = async (req, res) => {
       return res.status(404).json({ message: "Diagnostic center not found" });
     }
 
-    const now = moment();
-
-    // Function to filter out past slots
-    const filterFutureSlots = (slots) => {
-      return slots.filter(slot => {
-        const slotDateTime = moment(`${slot.date} ${slot.timeSlot}`, [
-          'YYYY-MM-DD HH:mm',
-          'YYYY-MM-DD H:mm',
-          'YYYY-MM-DD h:mm A'
-        ]);
-        return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
-      });
-    };
-
-    // Filter homeCollectionSlots and centerVisitSlots
-    const filteredHomeSlots = filterFutureSlots(diagnostic.homeCollectionSlots || []);
-    const filteredCenterSlots = filterFutureSlots(diagnostic.centerVisitSlots || []);
-
+    // NO FILTERING - सभी slots return करें
     const diagnosticData = {
       ...diagnostic.toObject(),
-      homeCollectionSlots: filteredHomeSlots,
-      centerVisitSlots: filteredCenterSlots
+      // Original slots ही return करें
+      homeCollectionSlots: diagnostic.homeCollectionSlots || [],
+      centerVisitSlots: diagnostic.centerVisitSlots || []
     };
 
     return res.status(200).json({
-      message: "Diagnostic fetched successfully",
+      message: "Diagnostic fetched successfully with ALL slots",
       diagnostic: diagnosticData,
     });
 
@@ -5470,7 +8932,6 @@ export const getDiagnosticById = async (req, res) => {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 
 // 🧹 Delete diagnostic and its related data
 export const deleteDiagnosticById = async (req, res) => {
@@ -5555,10 +9016,16 @@ export const uploadHraImage = (req, res) => {
     }
 
     try {
-      const { hraName, prescribed } = req.body;
+      const { hraName, prescribed, gender } = req.body;
 
       if (!hraName) {
         return res.status(400).json({ message: 'HRA name is required' });
+      }
+
+      // Add validation for gender if necessary, for example:
+      const validGenders = ['male', 'female', 'other', 'both'];
+      if (gender && !validGenders.includes(gender.toLowerCase())) {
+        return res.status(400).json({ message: 'Invalid gender. Valid options are: male, female, other.' });
       }
 
       const hraImage = req.file ? `/uploads/category-images/${req.file.filename}` : null;
@@ -5567,6 +9034,7 @@ export const uploadHraImage = (req, res) => {
         hraName,
         hraImage,
         prescribed: prescribed || '', // set to empty string if not provided
+        gender: gender || '', // set gender to empty string if not provided
       });
 
       await newHra.save();
@@ -5593,7 +9061,7 @@ export const updateHra = async (req, res) => {
 
     try {
       const { hraId } = req.params;
-      const { hraName, prescribed } = req.body;
+      const { hraName, prescribed, gender } = req.body;  // Added gender field
 
       const hra = await Hra.findById(hraId);
       if (!hra) {
@@ -5607,6 +9075,9 @@ export const updateHra = async (req, res) => {
       if (typeof prescribed !== 'undefined') {
         hra.prescribed = prescribed;
       }
+
+      // Update gender if provided
+      if (gender) hra.gender = gender;  // Update the gender field
 
       // Update image if file uploaded
       if (req.file) {
@@ -5752,15 +9223,21 @@ export const getAllHraQuestions = async (req, res) => {
       // Fetch questions based on hraCategoryId
       hraQuestions = await HraQuestion.find({
         hraCategoryId: hraCategory._id,
-      }).select('hraCategoryId hraCategoryName question options');
+      }).select('hraCategoryId hraCategoryName gender question options');
 
       if (!hraQuestions.length) {
         return res.status(404).json({
           message: 'No HRA questions found for the given category',
         });
       }
+
+      // Include the gender of the category in each question response
+      hraQuestions = hraQuestions.map((question) => ({
+        ...question.toObject(),
+        gender: hraCategory.gender,  // Add the category gender to each question
+      }));
     } else {
-      // Fetch all HRA questions
+      // Fetch all HRA questions without category filtering
       hraQuestions = await HraQuestion.find().select('hraCategoryId hraCategoryName question options');
 
       if (!hraQuestions.length) {
@@ -5768,6 +9245,22 @@ export const getAllHraQuestions = async (req, res) => {
           message: 'No HRA questions found',
         });
       }
+
+      // Fetch all categories to add gender info
+      const categories = await Hra.find().select('hraName gender');
+      const categoryMap = categories.reduce((acc, category) => {
+        acc[category.hraName.toLowerCase()] = category.gender;
+        return acc;
+      }, {});
+
+      // Map each question with the gender of the category
+      hraQuestions = hraQuestions.map((question) => {
+        const categoryGender = categoryMap[question.hraCategoryName.toLowerCase()];
+        return {
+          ...question.toObject(),
+          gender: categoryGender || 'Unknown',  // Add gender based on the category
+        };
+      });
     }
 
     return res.status(200).json({
@@ -5782,7 +9275,6 @@ export const getAllHraQuestions = async (req, res) => {
     });
   }
 };
-
 
 
 // Update a single HRA question by ID
@@ -7093,55 +10585,55 @@ export const getAllStaffMedicalUploads = async (req, res) => {
 
 
 export const createEmployee = async (req, res) => {
-    const { 
-        name, 
-        email, 
-        password, 
-        mobile, 
-        location, // "location" will map to "address" in DB
-        gender, 
-        designation, 
-        department, 
-        employeeId, 
-        pagesAccess, 
-        grade 
-    } = req.body;
+  const {
+    name,
+    email,
+    password,
+    mobile,
+    location, // "location" will map to "address" in DB
+    gender,
+    designation,
+    department,
+    employeeId,
+    pagesAccess,
+    grade
+  } = req.body;
 
-    try {
-        const newEmployee = new Employee({
-            name,
-            email,
-            password,
-            mobile,
-            address: location, // Mapping location from frontend to address in the DB
-            gender,
-            designation,
-            department,
-            employeeId,
-            pagesAccess,
-            grade,
-            role: 'employee' // Default role set to "Employee"
-        });
+  try {
+    const newEmployee = new Employee({
+      name,
+      email,
+      password,
+      mobile,
+      address: location, // Mapping location from frontend to address in the DB
+      gender,
+      designation,
+      department,
+      employeeId,
+      pagesAccess,
+      grade,
+      role: 'employee' // Default role set to "Employee"
+    });
 
-        // Save the employee to the database
-        await newEmployee.save();
-        res.status(201).json({
-            message: 'Employee created successfully',
-            employee: newEmployee
-        });
-    } catch (error) {
-        res.status(500).json({ message: 'Error creating employee', error: error.message });
-    }
+    // Save the employee to the database
+    await newEmployee.save();
+    res.status(201).json({
+      message: 'Employee created successfully',
+      employee: newEmployee
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error creating employee', error: error.message });
+  }
 };
 
 // Fetch all employees
 export const getEmployees = async (req, res) => {
-    try {
-        const employees = await Employee.find();
-        res.status(200).json({ employees });
-    } catch (error) {
-        res.status(500).json({ message: 'Error fetching employees', error: error.message });
-    }
+  try {
+    const employees = await Employee.find();
+    res.status(200).json({ employees });
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching employees', error: error.message });
+  }
 };
 
 
@@ -7177,73 +10669,73 @@ export const loginEmployee = async (req, res) => {
 
 // Update Employee
 export const updateEmployee = async (req, res) => {
-    const { 
-        name, 
-        email, 
-        mobile, 
-        location,  // location to address mapping
-        gender, 
-        designation, 
-        department, 
-        employeeId: newEmployeeId, // Rename to avoid conflict
-        pagesAccess, 
-        grade 
-    } = req.body;
+  const {
+    name,
+    email,
+    mobile,
+    location,  // location to address mapping
+    gender,
+    designation,
+    department,
+    employeeId: newEmployeeId, // Rename to avoid conflict
+    pagesAccess,
+    grade
+  } = req.body;
 
-    const { id } = req.params; // Get employee ID from params
+  const { id } = req.params; // Get employee ID from params
 
-    try {
-        // Find the employee by ID and update their details
-        const updatedEmployee = await Employee.findByIdAndUpdate(
-            id,  // Use id from params
-            {
-                name,
-                email,
-                mobile,
-                address: location, // Mapping location to address
-                gender,
-                designation,
-                department,
-                employeeId: newEmployeeId, // Use the renamed employeeId (newEmployeeId)
-                pagesAccess,
-                grade
-            },
-            { new: true }  // Return the updated document
-        );
+  try {
+    // Find the employee by ID and update their details
+    const updatedEmployee = await Employee.findByIdAndUpdate(
+      id,  // Use id from params
+      {
+        name,
+        email,
+        mobile,
+        address: location, // Mapping location to address
+        gender,
+        designation,
+        department,
+        employeeId: newEmployeeId, // Use the renamed employeeId (newEmployeeId)
+        pagesAccess,
+        grade
+      },
+      { new: true }  // Return the updated document
+    );
 
-        if (!updatedEmployee) {
-            return res.status(404).json({ message: 'Employee not found' });
-        }
-
-        res.status(200).json({
-            message: 'Employee updated successfully',
-            employee: updatedEmployee
-        });
-    } catch (error) {
-        res.status(500).json({ message: 'Error updating employee', error: error.message });
+    if (!updatedEmployee) {
+      return res.status(404).json({ message: 'Employee not found' });
     }
+
+    res.status(200).json({
+      message: 'Employee updated successfully',
+      employee: updatedEmployee
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error updating employee', error: error.message });
+  }
 };
 
 
 
 // Delete Employee
 export const deleteEmployee = async (req, res) => {
-    const id = req.params.id; // Get employee ID from params
+  const id = req.params.id; // Get employee ID from params
 
-    try {
-        const deletedEmployee = await Employee.findByIdAndDelete(id);
+  try {
+    const deletedEmployee = await Employee.findByIdAndDelete(id);
 
-        if (!deletedEmployee) {
-            return res.status(404).json({ message: 'Employee not found' });
-        }
-
-        res.status(200).json({
-            message: 'Employee deleted successfully',
-            employee: deletedEmployee
-        });
-    } catch (error) {
-        res.status(500).json({ message: 'Error deleting employee', error: error.message });
+    if (!deletedEmployee) {
+      return res.status(404).json({ message: 'Employee not found' });
     }
+
+    res.status(200).json({
+      message: 'Employee deleted successfully',
+      employee: deletedEmployee
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error deleting employee', error: error.message });
+  }
 };
 
 
@@ -7264,7 +10756,7 @@ export const uploadBannerController = (req, res) => {
 
     try {
       // Create an array of image URLs to save in the database
-      const imageUrls = req.files.map(file => 
+      const imageUrls = req.files.map(file =>
         path.join('uploads', 'banner-images', file.filename)  // Constructing the image URL
       );
 
@@ -7380,6 +10872,1487 @@ export const updateBannerImageController = async (req, res) => {
     return res.status(500).json({
       message: 'Error updating banner image',
       error: err.message,
+    });
+  }
+};
+
+
+
+export const getAllHraSubmissions = async (req, res) => {
+  try {
+    // 🔹 Fetch all submissions and populate staff info & question details
+    const submissions = await HraSubmission.find()
+      .populate({
+        path: "staffId",
+        select: "name email phone department branch age gender contact_number employeeId",
+      })
+      .populate({
+        path: "answers.questionId",
+        select: "question hraCategoryName options",
+      })
+      .sort({ submittedAt: -1 });
+
+    // 🔹 Pre-fetch all companies to map staffId -> companyName
+    const companies = await Company.find({}, { name: 1, staff: 1 });
+
+    const staffIdToCompanyName = {};
+    companies.forEach((company) => {
+      company.staff.forEach((staffObj) => {
+        staffIdToCompanyName[staffObj._id.toString()] = company.name;
+      });
+    });
+
+    // 🔹 Format clean JSON response
+    const formattedSubmissions = submissions.map((sub) => {
+      const staff = sub.staffId;
+      const companyName = staff ? staffIdToCompanyName[staff._id.toString()] || "" : "";
+
+      return {
+        submissionId: sub._id,
+        submittedAt: sub.submittedAt,
+        staff: staff
+          ? {
+              _id: staff._id,
+              name: staff.name,
+              email: staff.email,
+              employeeId: staff.employeeId, 
+              phone: staff.phone,
+              department: staff.department || "",
+              branch: staff.branch || "",
+              age: staff.age || null,
+              gender: staff.gender || "",
+              mobile: staff.contact_number || "",
+              company: companyName, // ✅ Fixed: now company shows correctly
+            }
+          : null,
+        totalPoints: sub.totalPoints,
+        riskLevel: sub.riskLevel,
+        riskMessage: sub.riskMessage,
+        categoryPoints: Object.fromEntries(sub.categoryPoints || []),
+        prescribedForCategories: Object.fromEntries(sub.prescribedForCategories || []),
+        answers: sub.answers.map((ans) => {
+          const q = ans.questionId;
+          const selectedOption = q?.options?.find(
+            (opt) => opt._id.toString() === ans.selectedOption.toString()
+          );
+
+          return {
+            questionId: q?._id || null,
+            questionText: q?.question || "",
+            category: q?.hraCategoryName || ans.hraCategoryName || "",
+            selectedOption: selectedOption
+              ? {
+                  _id: selectedOption._id,
+                  text: selectedOption.text || "",
+                  point: selectedOption.point || 0,
+                }
+              : null,
+            scoredPoints: ans.points,
+          };
+        }),
+      };
+    });
+
+    // ✅ Send response
+    return res.status(200).json({
+      success: true,
+      count: formattedSubmissions.length,
+      data: formattedSubmissions,
+    });
+  } catch (error) {
+    console.error("❌ Error fetching HRA submissions:", error);
+    return res.status(500).json({
+      success: false,
+      message: "💥 Failed to fetch HRA submissions.",
+      error: error.message,
+    });
+  }
+};
+
+
+
+
+// Create a new question
+export const createQuestion = async (req, res) => {
+  try {
+    const { question } = req.body;  // Expecting a single question
+
+    if (!question) {
+      return res.status(400).json({ message: 'Please provide a question.' });
+    }
+
+    // Create a new question
+    const newQuestion = new SimpleQuestion({
+      question,  // Store the question text
+    });
+
+    // Save the question in the database
+    const savedQuestion = await newQuestion.save();
+
+    return res.status(201).json({
+      message: 'Question created successfully',
+      data: savedQuestion,
+    });
+  } catch (error) {
+    console.error('Error creating question:', error);
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+// Edit an existing question
+export const editQuestion = async (req, res) => {
+  try {
+    const { questionId } = req.params; // Extract questionId from params
+    const { question } = req.body;    // Extract new question text from body
+
+    if (!question) {
+      return res.status(400).json({ message: 'Please provide a question to update.' });
+    }
+
+    // Find the question by its ID and update it
+    const updatedQuestion = await SimpleQuestion.findByIdAndUpdate(
+      questionId,
+      { question }, // Update only the question field
+      { new: true } // Return the updated document
+    );
+
+    if (!updatedQuestion) {
+      return res.status(404).json({ message: 'Question not found.' });
+    }
+
+    return res.status(200).json({
+      message: 'Question updated successfully',
+      data: updatedQuestion,
+    });
+  } catch (error) {
+    console.error('Error updating question:', error);
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+// Delete a question
+export const deleteQuestion = async (req, res) => {
+  try {
+    const { questionId } = req.params;  // Extract questionId from params
+
+    // Find and delete the question by its ID
+    const deletedQuestion = await SimpleQuestion.findByIdAndDelete(questionId);
+
+    if (!deletedQuestion) {
+      return res.status(404).json({ message: 'Question not found.' });
+    }
+
+    return res.status(200).json({
+      message: 'Question deleted successfully',
+      data: deletedQuestion,
+    });
+  } catch (error) {
+    console.error('Error deleting question:', error);
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+
+// Get all questions
+export const getAllQuestions = async (req, res) => {
+  try {
+    const questions = await SimpleQuestion.find();
+
+    if (questions.length === 0) {
+      return res.status(404).json({ message: 'No questions found.' });
+    }
+
+    return res.status(200).json({
+      message: 'Questions retrieved successfully',
+      data: questions,
+    });
+  } catch (error) {
+    console.error('Error fetching questions:', error);
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+
+// Get all questions with their answers
+export const getAllAnswersQuestions = async (req, res) => {
+  try {
+    // Fetch all questions, including the submitted answers
+    const questions = await SimpleQuestion.find().populate('submittedAnswers.userId', 'name email'); // Populate the user data with name and email
+
+    // Check if there are any questions
+    if (questions.length === 0) {
+      return res.status(404).json({ message: 'No questions found.' });
+    }
+
+    return res.status(200).json({
+      message: 'Questions fetched successfully',
+      data: questions,  // Return all questions with answers
+    });
+  } catch (error) {
+    console.error('Error fetching questions:', error);
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+
+// Create new test
+export const createTestt = async (req, res) => {
+  try {
+    const {
+      name,
+      price,
+      gender, // NEW: Added gender
+      description,
+      instruction,
+      fastingRequired,
+      homeCollectionAvailable,
+      reportIn24Hrs,
+      reportHour,
+      category,
+      precaution,
+      diagnosticIds
+    } = req.body;
+
+    // Validate gender
+    if (!gender || !['Male', 'Female', 'Both'].includes(gender)) {
+      return res.status(400).json({
+        success: false,
+        message: "Gender is required and must be Male, Female, or Both"
+      });
+    }
+
+    // Create new test with gender
+    const newTest = new Test({
+      name,
+      price,
+      gender, // NEW: Include gender
+      description,
+      instruction,
+      fastingRequired: fastingRequired || false,
+      homeCollectionAvailable: homeCollectionAvailable || false,
+      reportIn24Hrs: reportIn24Hrs || false,
+      reportHour,
+      category: category || 'General',
+      precaution
+    });
+
+    const savedTest = await newTest.save();
+
+    // Link test to diagnostics
+    if (diagnosticIds && diagnosticIds.length > 0) {
+      await Diagnostic.updateMany(
+        { _id: { $in: diagnosticIds } },
+        { $push: { tests: savedTest._id } }
+      );
+      
+      // Update test diagnostics array
+      savedTest.diagnostics = diagnosticIds;
+      await savedTest.save();
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Test created successfully',
+      test: savedTest
+    });
+  } catch (error) {
+    console.error('Create test error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create test',
+      error: error.message
+    });
+  }
+};
+
+// Create new scan - FIXED VERSION
+export const createScann = async (req, res) => {
+  try {
+    const {
+      title,
+      price,
+      preparation,
+      reportTime,
+      category,
+      diagnosticIds,
+      gender
+    } = req.body;
+
+    console.log("Received diagnosticIds:", diagnosticIds);
+    console.log("Type of diagnosticIds:", typeof diagnosticIds);
+
+    // Handle image upload
+    let image = '';
+    if (req.file) {
+      image = `/uploads/scans/${req.file.filename}`;
+    }
+
+    const newScan = new Xray({
+      title,
+      price,
+      preparation,
+      reportTime,
+      category,
+      image,
+      gender
+    });
+
+    const savedScan = await newScan.save();
+
+    // Parse diagnosticIds from JSON string to array
+    let parsedDiagnosticIds = [];
+    try {
+      if (diagnosticIds) {
+        if (typeof diagnosticIds === 'string') {
+          parsedDiagnosticIds = JSON.parse(diagnosticIds);
+        } else if (Array.isArray(diagnosticIds)) {
+          parsedDiagnosticIds = diagnosticIds;
+        }
+      }
+    } catch (parseError) {
+      console.error("Error parsing diagnosticIds:", parseError);
+      // Continue without linking if parsing fails
+    }
+
+    console.log("Parsed diagnosticIds:", parsedDiagnosticIds);
+
+    // Link scan to diagnostics
+    if (parsedDiagnosticIds && parsedDiagnosticIds.length > 0) {
+      await Diagnostic.updateMany(
+        { _id: { $in: parsedDiagnosticIds } },
+        { $push: { scans: savedScan._id } }
+      );
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Scan created successfully',
+      scan: savedScan
+    });
+  } catch (error) {
+    console.error('Create scan error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create scan',
+      error: error.message
+    });
+  }
+};
+
+
+
+export const updateStaffBranches = async (req, res) => {
+  try {
+    const { staffIds, companyId, branch } = req.body;
+
+    if (!Array.isArray(staffIds) || staffIds.length === 0) {
+      return res.status(400).json({ message: "staffIds must be a non-empty array" });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(companyId)) {
+      return res.status(400).json({ message: "Invalid company ID" });
+    }
+
+    // ✅ Validate all staffIds
+    const invalidIds = staffIds.filter(id => !mongoose.Types.ObjectId.isValid(id));
+    if (invalidIds.length > 0) {
+      return res.status(400).json({ message: "Invalid staff IDs", invalidIds });
+    }
+
+    // 1️⃣ Update all staff documents
+    const updateResult = await Staff.updateMany(
+      { _id: { $in: staffIds } },
+      { branch: branch || null }
+    );
+
+    // 2️⃣ Update branch inside company.staff array
+    const company = await Company.findById(companyId);
+    if (!company) {
+      return res.status(404).json({ message: "Company not found" });
+    }
+
+    company.staff = company.staff.map((s) => {
+      if (staffIds.includes(s._id.toString())) {
+        return { ...s.toObject(), branch: branch || null };
+      }
+      return s;
+    });
+
+    await company.save();
+
+    res.status(200).json({
+      message: "Branches updated successfully for all selected staff",
+      updatedCount: updateResult.modifiedCount,
+      companyStaff: company.staff,
+    });
+  } catch (error) {
+    console.error("❌ Error updating staff branches:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
+export const getCompanyStaff = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    const company = await Company.findById(companyId)
+      .populate({
+        path: 'staff._id',   // populate _id inside staff[]
+        model: 'Staff'
+      });
+
+    if (!company) {
+      return res.status(404).json({ message: 'Company not found' });
+    }
+
+    // Extract only populated Staff model data
+    const fullStaffDetails = company.staff.map((s) => s._id); 
+
+    res.status(200).json({
+      message: 'Company staff fetched successfully',
+      staff: fullStaffDetails
+    });
+
+  } catch (error) {
+    console.error('Error fetching company staff:', error);
+    res.status(500).json({ message: 'Server error', error });
+  }
+};
+
+
+
+export const bulkUpdateEmployeeId = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "CSV file is required" });
+    }
+
+    const results = [];
+
+    fs.createReadStream(req.file.path)
+      .pipe(csvParser({
+        mapHeaders: ({ header }) => header.trim(),
+      }))
+      .on("data", (row) => results.push(row))
+      .on("end", async () => {
+        const updateResults = [];
+
+        for (const row of results) {
+          // Extract all possible fields from CSV
+          const name = (row.name || "").trim();
+          const employeeId = (row.employeeId || row.employeeid || "").trim();
+          const email = (row.email || "").trim();
+          const contact_number = (row.contact_number || row.contact || row.phone || row.mobile || "").trim();
+          const department = (row.department || "").trim();
+          const role = (row.role || row.designation || "").trim();
+          const gender = (row.gender || "").trim();
+          
+          // Date parsing
+          let dob = null;
+          const dobStr = (row.dob || row.dateOfBirth || row.birthdate || row.birthDate || "").trim();
+          
+          if (dobStr) {
+            dob = parseAnyDate(dobStr);
+            if (dob) {
+              console.log(`✅ Parsed DOB for ${name}: ${dobStr} → ${dob.toISOString()}`);
+            } else {
+              console.log(`❌ Could not parse DOB for ${name}: ${dobStr}`);
+            }
+          }
+          
+          const address = (row.address || "").trim();
+          const age = parseNumber(row.age);
+          const height = parseNumber(row.height);
+          const weight = parseNumber(row.weight);
+          const BP = (row.BP || row.blood_pressure || row.bloodPressure || "").trim();
+          const BMI = parseNumber(row.BMI);
+          const eyeSight = (row.eyeSight || row.eyesight || row.eye_sight || "").trim();
+
+          // Validate name is required
+          if (!name) {
+            updateResults.push({ 
+              name: name || null, 
+              employeeId: employeeId || null, 
+              status: "Skipped: Name is required" 
+            });
+            continue;
+          }
+
+          // Build update object with only non-empty values
+          const updateFields = {};
+          if (employeeId) updateFields.employeeId = employeeId;
+          if (email) updateFields.email = email;
+          if (contact_number) updateFields.contact_number = contact_number;
+          if (department) updateFields.department = department;
+          if (role) updateFields.role = role;
+          if (gender) updateFields.gender = gender;
+          if (dob) updateFields.dob = dob;
+          if (address) updateFields.address = address;
+          if (age !== null && !isNaN(age)) updateFields.age = age;
+          if (height !== null && !isNaN(height)) updateFields.height = height;
+          if (weight !== null && !isNaN(weight)) updateFields.weight = weight;
+          if (BP) updateFields.BP = BP;
+          if (BMI !== null && !isNaN(BMI)) updateFields.BMI = BMI;
+          if (eyeSight) updateFields.eyeSight = eyeSight;
+
+          // Check if we have any fields to update
+          if (Object.keys(updateFields).length === 0) {
+            updateResults.push({ 
+              name, 
+              employeeId: employeeId || null, 
+              status: "Skipped: No valid fields to update" 
+            });
+            continue;
+          }
+
+          try {
+            // 1. Pehle Staff collection mein update karo
+            const staff = await Staff.findOne({ name: new RegExp(`^${name}$`, "i") });
+
+            if (staff) {
+              console.log(`📝 Updating staff ${name} in Staff collection with fields:`, updateFields);
+              
+              // Update staff document
+              Object.assign(staff, updateFields);
+              await staff.save();
+
+              console.log(`✅ Successfully updated staff ${name} in Staff collection`);
+
+              // 2. Ab Company find karo jisme yeh staff hai
+              // Company schema mein staff array hai, usme find karo
+              const companies = await Company.find({
+                "staff.name": new RegExp(`^${name}$`, "i")
+              });
+
+              if (companies.length > 0) {
+                console.log(`Found staff ${name} in ${companies.length} companies`);
+                
+                for (const company of companies) {
+                  // Find the staff in company's staff array
+                  const staffIndex = company.staff.findIndex(s => 
+                    s && s.name && s.name.toLowerCase() === name.toLowerCase()
+                  );
+                  
+                  if (staffIndex !== -1) {
+                    // Update fields in company's staff array
+                    const staffInCompany = company.staff[staffIndex];
+                    
+                    // Update only fields that exist in updateFields
+                    if (employeeId) staffInCompany.employeeId = employeeId;
+                    if (dob) staffInCompany.dob = dob;
+                    if (email) staffInCompany.email = email;
+                    if (contact_number) staffInCompany.contact_number = contact_number;
+                    if (department) staffInCompany.department = department;
+                    if (role) staffInCompany.role = role;
+                    if (gender) staffInCompany.gender = gender;
+                    if (address) staffInCompany.address = address;
+                    if (age !== null && !isNaN(age)) staffInCompany.age = age;
+                    if (height !== null && !isNaN(height)) staffInCompany.height = height;
+                    if (weight !== null && !isNaN(weight)) staffInCompany.weight = weight;
+                    if (BP) staffInCompany.BP = BP;
+                    if (BMI !== null && !isNaN(BMI)) staffInCompany.BMI = BMI;
+                    if (eyeSight) staffInCompany.eyeSight = eyeSight;
+                    
+                    // Mark the array as modified
+                    company.markModified('staff');
+                    
+                    await company.save();
+                    console.log(`✅ Updated staff ${name} in company: ${company.name}`);
+                  }
+                }
+              } else {
+                console.log(`⚠️ Staff ${name} not found in any company's staff array`);
+              }
+
+              updateResults.push({ 
+                name, 
+                employeeId: employeeId || staff.employeeId, 
+                fieldsUpdated: Object.keys(updateFields),
+                status: "Updated successfully" 
+              });
+            } else {
+              updateResults.push({ 
+                name, 
+                employeeId: employeeId || null, 
+                status: "Staff Not Found in Staff collection" 
+              });
+            }
+          } catch (error) {
+            console.error(`❌ Error updating staff ${name}:`, error);
+            updateResults.push({ 
+              name, 
+              employeeId: employeeId || null, 
+              status: `Error: ${error.message}` 
+            });
+          }
+        }
+
+        // Clean up uploaded file
+        try { 
+          fs.unlinkSync(req.file.path); 
+        } catch (e) {
+          console.warn("Failed to delete uploaded CSV file:", e.message);
+        }
+
+        return res.status(200).json({
+          message: "Bulk staff update completed",
+          totalRecords: results.length,
+          results: updateResults,
+        });
+      })
+      .on("error", (error) => {
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
+        return res.status(400).json({ 
+          message: "Error processing CSV file", 
+          error: error.message 
+        });
+      });
+
+  } catch (error) {
+    console.error("❌ Bulk staff upload error:", error);
+    return res.status(500).json({
+      message: "Server error during bulk staff upload",
+      error: error.message,
+    });
+  }
+};
+
+// Universal date parser function
+function parseAnyDate(dateStr) {
+  if (!dateStr) return null;
+  
+  dateStr = dateStr.toString().trim();
+  
+  // Try common formats
+  const formats = [
+    // DD-MM-YYYY
+    () => {
+      const match = dateStr.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+      if (match) {
+        const day = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10) - 1;
+        const year = parseInt(match[3], 10);
+        const date = new Date(year, month, day);
+        if (!isNaN(date.getTime())) return date;
+      }
+      return null;
+    },
+    // MM-DD-YYYY
+    () => {
+      const match = dateStr.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+      if (match) {
+        const month = parseInt(match[1], 10) - 1;
+        const day = parseInt(match[2], 10);
+        const year = parseInt(match[3], 10);
+        const date = new Date(year, month, day);
+        if (!isNaN(date.getTime())) return date;
+      }
+      return null;
+    },
+    // YYYY-MM-DD
+    () => {
+      const match = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+      if (match) {
+        const year = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10) - 1;
+        const day = parseInt(match[3], 10);
+        const date = new Date(year, month, day);
+        if (!isNaN(date.getTime())) return date;
+      }
+      return null;
+    },
+    // DD/MM/YYYY
+    () => {
+      const match = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (match) {
+        const day = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10) - 1;
+        const year = parseInt(match[3], 10);
+        const date = new Date(year, month, day);
+        if (!isNaN(date.getTime())) return date;
+      }
+      return null;
+    },
+    // MM/DD/YYYY
+    () => {
+      const match = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (match) {
+        const month = parseInt(match[1], 10) - 1;
+        const day = parseInt(match[2], 10);
+        const year = parseInt(match[3], 10);
+        const date = new Date(year, month, day);
+        if (!isNaN(date.getTime())) return date;
+      }
+      return null;
+    },
+    // Direct Date parsing
+    () => {
+      const date = new Date(dateStr);
+      return !isNaN(date.getTime()) ? date : null;
+    }
+  ];
+  
+  for (const format of formats) {
+    const date = format();
+    if (date) return date;
+  }
+  
+  console.log(`⚠️ Could not parse date: ${dateStr}`);
+  return null;
+}
+
+// Helper function to parse numbers
+function parseNumber(value) {
+  if (!value && value !== 0) return null;
+  
+  const str = value.toString().trim();
+  if (str === '') return null;
+  
+  const cleaned = str.replace(/[^\d.-]/g, '');
+  const num = parseFloat(cleaned);
+  return isNaN(num) ? null : num;
+}
+// Remove package from staff
+export const removePackageFromStaff = async (req, res) => {
+    try {
+        const { staffId } = req.params;
+        const { packageId } = req.body;
+
+        // Validate input
+        if (!packageId || !staffId) {
+            return res.status(400).json({
+                success: false,
+                message: "Package ID and Staff ID are required"
+            });
+        }
+
+        // Find staff
+        const staff = await Staff.findById(staffId);
+        if (!staff) {
+            return res.status(404).json({
+                success: false,
+                message: "Staff not found"
+            });
+        }
+
+        // // Find package - variable name change from 'package' to 'pkgData'
+        // const pkgData = await Package.findById(packageId);
+        // if (!pkgData) {
+        //     return res.status(404).json({
+        //         success: false,
+        //         message: "Package not found"
+        //     });
+        // }
+
+        // Check if package is assigned to staff
+        const isPackageAssigned = staff.myPackages.some(pkg => 
+            pkg._id.toString() === packageId || 
+            pkg.packageId?.toString() === packageId
+        );
+
+        if (!isPackageAssigned) {
+            return res.status(400).json({
+                success: false,
+                message: "Package is not assigned to this staff"
+            });
+        }
+
+        // Remove package from staff's myPackages array
+        staff.myPackages = staff.myPackages.filter(pkg => 
+            pkg._id.toString() !== packageId && 
+            pkg.packageId?.toString() !== packageId
+        );
+
+        // Save updated staff
+        await staff.save();
+
+        res.status(200).json({
+            success: true,
+            message: "Package removed from staff successfully",
+            data: staff
+        });
+
+    } catch (error) {
+        console.error("Error removing package from staff:", error);
+        res.status(500).json({
+            success: false,
+            message: "Server error",
+            error: error.message
+        });
+    }
+};
+
+// Remove test from staff
+export const removeTestFromStaff = async (req, res) => {
+    try {
+        const { staffId } = req.params;
+        const { testId } = req.body;
+
+        // Validate input
+        if (!testId || !staffId) {
+            return res.status(400).json({
+                success: false,
+                message: "Test ID and Staff ID are required"
+            });
+        }
+
+        // Find staff
+        const staff = await Staff.findById(staffId);
+        if (!staff) {
+            return res.status(404).json({
+                success: false,
+                message: "Staff not found"
+            });
+        }
+
+        // Check if test is assigned to staff
+        const isTestAssigned = staff.myTests.some(t => 
+            t._id.toString() === testId || 
+            t.testId?.toString() === testId
+        );
+
+        if (!isTestAssigned) {
+            return res.status(400).json({
+                success: false,
+                message: "Test is not assigned to this staff"
+            });
+        }
+
+        // Remove test from staff's myTests array
+        staff.myTests = staff.myTests.filter(t => 
+            t._id.toString() !== testId && 
+            t.testId?.toString() !== testId
+        );
+
+        // Save updated staff
+        await staff.save();
+
+        res.status(200).json({
+            success: true,
+            message: "Test removed from staff successfully",
+            data: staff
+        });
+
+    } catch (error) {
+        console.error("Error removing test from staff:", error);
+        res.status(500).json({
+            success: false,
+            message: "Server error",
+            error: error.message
+        });
+    }
+};
+
+// Remove scan from staff
+export const removeScanFromStaff = async (req, res) => {
+    try {
+        const { staffId } = req.params;
+        const { scanId } = req.body;
+
+        // Validate input
+        if (!scanId || !staffId) {
+            return res.status(400).json({
+                success: false,
+                message: "Scan ID and Staff ID are required"
+            });
+        }
+
+        // Find staff
+        const staff = await Staff.findById(staffId);
+        if (!staff) {
+            return res.status(404).json({
+                success: false,
+                message: "Staff not found"
+            });
+        }
+
+        // Check if scan is assigned to staff
+        const isScanAssigned = staff.myScans.some(s => 
+            s._id.toString() === scanId || 
+            s.scanId?.toString() === scanId
+        );
+
+        if (!isScanAssigned) {
+            return res.status(400).json({
+                success: false,
+                message: "Scan is not assigned to this staff"
+            });
+        }
+
+        // Remove scan from staff's myScans array
+        staff.myScans = staff.myScans.filter(s => 
+            s._id.toString() !== scanId && 
+            s.scanId?.toString() !== scanId
+        );
+
+        // Save updated staff
+        await staff.save();
+
+        res.status(200).json({
+            success: true,
+            message: "Scan removed from staff successfully",
+            data: staff
+        });
+
+    } catch (error) {
+        console.error("Error removing scan from staff:", error);
+        res.status(500).json({
+            success: false,
+            message: "Server error",
+            error: error.message
+        });
+    }
+};
+
+
+
+export const getAllCompanyDiagnostics = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    if (!companyId) {
+      return res.status(400).json({
+        message: "companyId is required"
+      });
+    }
+
+    // STEP 1: Find Company
+    const company = await Company.findById(companyId);
+
+    if (!company) {
+      return res.status(404).json({
+        message: "Company not found",
+        data: []
+      });
+    }
+
+    // Total diagnostics assigned to this company
+    const companyDiagnosticsCount = company.diagnostics.length;
+
+    // STEP 2: Extract diagnosticIds from company.diagnostics (mixed structure handled)
+    const diagnosticIds = company.diagnostics.map(d => {
+      // Case 1: Direct ObjectId or string
+      if (typeof d === "string" || (d && d._bsontype === "ObjectID")) {
+        return d;
+      }
+
+      // Case 2: Object -> { diagnosticId, diagnosticName, ... }
+      return d.diagnosticId;
+    });
+
+    if (diagnosticIds.length === 0) {
+      return res.status(200).json({
+        message: "No diagnostics assigned to this company",
+        data: [],
+        count: 0,
+        companyDiagnosticsCount,
+        companyName: company.companyName
+      });
+    }
+
+    console.log("Diagnostic IDs:", diagnosticIds);
+
+    // STEP 3: Fetch only company's diagnostics
+    let diagnostics = await Diagnostic.find({ _id: { $in: diagnosticIds } })
+      .populate("tests")
+      .populate("packages")
+      .populate("scans");
+
+    // STEP 4: Filter future slots
+    const now = moment();
+
+    const filterFutureSlots = (slots) => {
+      return (slots || []).filter(slot => {
+        const slotDateTime = moment(
+          `${slot.date} ${slot.timeSlot}`,
+          ['YYYY-MM-DD HH:mm', 'YYYY-MM-DD H:mm', 'YYYY-MM-DD h:mm A']
+        );
+        return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
+      });
+    };
+
+    const filteredDiagnostics = diagnostics.map(doc => {
+      const dObj = doc.toObject();
+      return {
+        ...dObj,
+        homeCollectionSlots: filterFutureSlots(dObj.homeCollectionSlots),
+        centerVisitSlots: filterFutureSlots(dObj.centerVisitSlots),
+      };
+    });
+
+    // STEP 5: Return Response
+    return res.status(200).json({
+      message: "Company diagnostics fetched successfully",
+      data: filteredDiagnostics,
+      count: filteredDiagnostics.length,
+      companyDiagnosticsCount, // <-- new field added
+      companyInfo: {
+        companyId,
+        companyName: company.companyName,
+        email: company.email
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Error fetching company diagnostics:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message
+    });
+  }
+};
+
+
+
+export const getAllCompanyDiagnosticsByUser = async (req, res) => {
+  try {
+    const { companyId, staffId } = req.params;
+
+    if (!companyId) {
+      return res.status(400).json({
+        message: "companyId is required"
+      });
+    }
+
+    if (!staffId) {
+      return res.status(400).json({
+        message: "staffId is required"
+      });
+    }
+
+    // STEP 1: Find Company
+    const company = await Company.findById(companyId);
+
+    if (!company) {
+      return res.status(404).json({
+        message: "Company not found",
+        data: []
+      });
+    }
+
+    // STEP 2: Staff details fetch karein
+    const staff = await Staff.findById(staffId);
+    
+    if (!staff) {
+      return res.status(404).json({
+        message: "Staff not found",
+        data: []
+      });
+    }
+
+    const staffGender = staff.gender; // Male, Female, or Other
+
+    console.log(`👤 Staff Gender: ${staffGender}`);
+
+    // STEP 3: Staff ka cart fetch karein
+    const cart = await Cart.findOne({ userId: staffId });
+    let cartItemIds = [];
+
+    if (cart && cart.items.length > 0) {
+      cartItemIds = cart.items
+        .filter(item => item && item.itemId)
+        .map(item => item.itemId.toString());
+    }
+
+    console.log("📦 Staff Cart Item IDs:", cartItemIds);
+
+    // Total diagnostics assigned to this company
+    const companyDiagnosticsCount = company.diagnostics.length;
+
+    // STEP 4: Extract diagnosticIds from company.diagnostics
+    const diagnosticIds = company.diagnostics.map(d => {
+      if (typeof d === "string" || (d && d._bsontype === "ObjectID")) {
+        return d;
+      }
+      return d.diagnosticId;
+    });
+
+    if (diagnosticIds.length === 0) {
+      return res.status(200).json({
+        message: "No diagnostics assigned to this company",
+        data: [],
+        count: 0,
+        companyDiagnosticsCount,
+        companyName: company.companyName
+      });
+    }
+
+    // STEP 5: Fetch company's diagnostics
+    let diagnostics = await Diagnostic.find({ _id: { $in: diagnosticIds } })
+      .populate("tests")
+      .populate("packages")
+      .populate("scans");
+
+    // STEP 6: Gender-based filtering for tests and scans (WITH "Both" support)
+    const diagnosticsWithGenderFilter = diagnostics.map(diagnostic => {
+      const diagnosticObj = diagnostic.toObject();
+      
+      // Filter tests based on gender (with Both support)
+      const filteredTests = diagnosticObj.tests.filter(test => {
+        // Agar test ka gender defined nahi hai to show karo
+        if (!test.gender) return true;
+        
+        // Agar staff gender "Other" hai to sab dikhao
+        if (staffGender === 'Other') return true;
+        
+        // Gender match logic (case-insensitive)
+        const testGender = test.gender.toLowerCase();
+        const userGender = staffGender.toLowerCase();
+        
+        // Show if:
+        // 1. test.gender === 'unisex' (sabke liye)
+        // 2. test.gender === 'both' (Male aur Female dono ke liye)
+        // 3. test.gender === userGender (exact match)
+        return testGender === 'unisex' || 
+               testGender === 'both' || 
+               testGender === userGender;
+      });
+
+      // Filter scans based on gender (with Both support)
+      const filteredScans = diagnosticObj.scans.filter(scan => {
+        // Agar scan ka gender defined nahi hai to show karo
+        if (!scan.gender) return true;
+        
+        // Agar staff gender "Other" hai to sab dikhao
+        if (staffGender === 'Other') return true;
+        
+        // Gender match logic (case-insensitive)
+        const scanGender = scan.gender.toLowerCase();
+        const userGender = staffGender.toLowerCase();
+        
+        return scanGender === 'unisex' || 
+               scanGender === 'both' || 
+               scanGender === userGender;
+      });
+
+      return {
+        ...diagnosticObj,
+        tests: filteredTests,
+        scans: filteredScans,
+        originalTestsCount: diagnosticObj.tests.length,
+        originalScansCount: diagnosticObj.scans.length,
+        filteredTestsCount: filteredTests.length,
+        filteredScansCount: filteredScans.length
+      };
+    });
+
+    // STEP 7: Filter diagnostics based on cart items (gender filtered ke baad)
+    const filteredDiagnostics = diagnosticsWithGenderFilter.filter(diagnostic => {
+      // Agar cart empty hai to sab diagnostics dikhao
+      if (cartItemIds.length === 0) {
+        return true;
+      }
+
+      // Gender filtered tests ke IDs collect karein
+      const diagnosticTestIds = diagnostic.tests.map(test => 
+        test._id ? test._id.toString() : test.toString()
+      );
+      
+      // Gender filtered scans ke IDs collect karein
+      const diagnosticScanIds = diagnostic.scans.map(scan => 
+        scan._id ? scan._id.toString() : scan.toString()
+      );
+
+      // Combine all diagnostic item IDs (gender filtered)
+      const allDiagnosticItemIds = [...diagnosticTestIds, ...diagnosticScanIds];
+
+      // Check if any cart item exists in diagnostic items
+      const hasMatchingItem = cartItemIds.some(cartItemId => 
+        allDiagnosticItemIds.includes(cartItemId)
+      );
+
+      return hasMatchingItem;
+    });
+
+    // STEP 8: Filter future slots
+    const now = moment();
+
+    const filterFutureSlots = (slots) => {
+      return (slots || []).filter(slot => {
+        const slotDateTime = moment(
+          `${slot.date} ${slot.timeSlot}`,
+          ['YYYY-MM-DD HH:mm', 'YYYY-MM-DD H:mm', 'YYYY-MM-DD h:mm A']
+        );
+        return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
+      });
+    };
+
+    const diagnosticsWithFilteredSlots = filteredDiagnostics.map(doc => {
+      return {
+        ...doc,
+        homeCollectionSlots: filterFutureSlots(doc.homeCollectionSlots),
+        centerVisitSlots: filterFutureSlots(doc.centerVisitSlots),
+        // Additional info
+        matchesCart: cartItemIds.length > 0,
+        matchedItemCount: cartItemIds.filter(cartItemId => {
+          const diagnosticTestIds = doc.tests.map(test => 
+            test._id ? test._id.toString() : test.toString()
+          );
+          const diagnosticScanIds = doc.scans.map(scan => 
+            scan._id ? scan._id.toString() : scan.toString()
+          );
+          return [...diagnosticTestIds, ...diagnosticScanIds].includes(cartItemId);
+        }).length
+      };
+    });
+
+    // STEP 9: Filter out diagnostics jinke tests aur scans dono empty ho gaye ho gender filtering ke baad
+    const finalDiagnostics = diagnosticsWithFilteredSlots.filter(diagnostic => 
+      diagnostic.tests.length > 0 || diagnostic.scans.length > 0
+    );
+
+    // STEP 10: Return Response
+    return res.status(200).json({
+      message: "Company diagnostics fetched successfully",
+      data: finalDiagnostics,
+      count: finalDiagnostics.length,
+      companyDiagnosticsCount,
+      staffInfo: {
+        staffId,
+        name: staff.name,
+        gender: staff.gender,
+        email: staff.email
+      },
+      cartInfo: {
+        hasCart: cartItemIds.length > 0,
+        cartItemCount: cartItemIds.length,
+        cartItems: cartItemIds
+      },
+      companyInfo: {
+        companyId,
+        companyName: company.companyName,
+        email: company.email
+      },
+      genderFilterInfo: {
+        applied: true,
+        logic: "Shows: Unisex, Both, and matching gender items",
+        note: "'Both' gender items are shown to both Male and Female staff"
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Error fetching company diagnostics:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message
+    });
+  }
+};
+
+
+export const getAllCompanyDiagnosticsByStaffPackages = async (req, res) => {
+  try {
+    const { companyId, staffId } = req.params;
+
+    if (!companyId) {
+      return res.status(400).json({
+        message: "companyId is required"
+      });
+    }
+
+    if (!staffId) {
+      return res.status(400).json({
+        message: "staffId is required"
+      });
+    }
+
+    // STEP 1: Find Company
+    const company = await Company.findById(companyId);
+
+    if (!company) {
+      return res.status(404).json({
+        message: "Company not found",
+        data: []
+      });
+    }
+
+    // STEP 2: Find Staff and get myPackages
+    const staff = await Staff.findById(staffId).select('myPackages');
+    
+    if (!staff) {
+      return res.status(404).json({
+        message: "Staff not found",
+        data: []
+      });
+    }
+
+    // STEP 3: Extract package IDs from staff's myPackages
+    const staffPackageIds = [];
+    
+    if (staff.myPackages && Array.isArray(staff.myPackages) && staff.myPackages.length > 0) {
+      staff.myPackages.forEach(pkg => {
+        if (pkg.packageId) {
+          staffPackageIds.push(pkg.packageId.toString());
+        }
+      });
+    }
+
+    console.log("📦 Staff myPackages IDs:", staffPackageIds);
+
+    // STEP 4: Extract diagnosticIds from company.diagnostics
+    const diagnosticIds = company.diagnostics.map(d => {
+      if (typeof d === "string" || (d && d._bsontype === "ObjectID")) {
+        return d;
+      }
+      return d.diagnosticId;
+    });
+
+    if (diagnosticIds.length === 0) {
+      return res.status(200).json({
+        message: "No diagnostics assigned to this company",
+        data: [],
+        count: 0,
+        companyDiagnosticsCount: company.diagnostics.length,
+        companyName: company.companyName
+      });
+    }
+
+    // STEP 5: Fetch company's diagnostics with populated data
+    let diagnostics = await Diagnostic.find({ _id: { $in: diagnosticIds } })
+      .populate("tests")
+      .populate("packages")
+      .populate("scans");
+
+    // STEP 6: Filter diagnostics based on staff's myPackages
+    const filteredDiagnostics = diagnostics.filter(diagnostic => {
+      // Agar staff ke paas koi packages nahi hai to sab diagnostics dikhao
+      if (staffPackageIds.length === 0) {
+        return true; // All diagnostics
+      }
+
+      // Check diagnostic ke packages mein se koi match karta hai
+      const diagnosticPackageIds = diagnostic.packages.map(pkg => 
+        pkg._id ? pkg._id.toString() : pkg.toString()
+      );
+
+      // Check if any staff package matches diagnostic packages
+      const hasPackageMatch = staffPackageIds.some(pkgId => 
+        diagnosticPackageIds.includes(pkgId)
+      );
+
+      return hasPackageMatch;
+    });
+
+    console.log(`🔍 Filtered ${filteredDiagnostics.length} out of ${diagnostics.length} diagnostics`);
+
+    // STEP 7: Filter future slots
+    const now = moment();
+
+    const filterFutureSlots = (slots) => {
+      return (slots || []).filter(slot => {
+        const slotDateTime = moment(
+          `${slot.date} ${slot.timeSlot}`,
+          ['YYYY-MM-DD HH:mm', 'YYYY-MM-DD H:mm', 'YYYY-MM-DD h:mm A']
+        );
+        return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
+      });
+    };
+
+    // STEP 8: Enrich diagnostics with matching package details
+    const enrichedDiagnostics = filteredDiagnostics.map(doc => {
+      const dObj = doc.toObject();
+      
+      // Find matching packages and their details
+      const matchingPackages = [];
+      
+      if (staffPackageIds.length > 0 && staff.myPackages) {
+        const diagnosticPackageIds = dObj.packages.map(pkg => 
+          pkg._id ? pkg._id.toString() : pkg.toString()
+        );
+        
+        // Staff ke packages mein se filter karein jo is diagnostic mein available hain
+        staff.myPackages.forEach(staffPackage => {
+          if (staffPackage.packageId && 
+              diagnosticPackageIds.includes(staffPackage.packageId.toString())) {
+            
+            // Find complete package details from diagnostic's packages
+            const packageDetails = dObj.packages.find(pkg => 
+              pkg._id.toString() === staffPackage.packageId.toString()
+            );
+            
+            matchingPackages.push({
+              packageId: staffPackage.packageId,
+              packageName: staffPackage.packageName || (packageDetails?.name || packageDetails?.packageName),
+              price: staffPackage.price,
+              offerPrice: staffPackage.offerPrice,
+              tests: staffPackage.tests || [],
+              diagnosticId: staffPackage.diagnosticId,
+              // Additional info if available
+              ...(packageDetails ? {
+                originalPackage: {
+                  name: packageDetails.name,
+                  description: packageDetails.description,
+                  price: packageDetails.price,
+                  offerPrice: packageDetails.offerPrice,
+                  category: packageDetails.category
+                }
+              } : {})
+            });
+          }
+        });
+      }
+
+      return {
+        ...dObj,
+        homeCollectionSlots: filterFutureSlots(dObj.homeCollectionSlots),
+        centerVisitSlots: filterFutureSlots(dObj.centerVisitSlots),
+        // Matching packages information
+        hasMyPackages: matchingPackages.length > 0,
+        myPackages: matchingPackages,
+        matchingPackageCount: matchingPackages.length,
+        // Flag to show if this diagnostic has user's packages
+        isMyPackageDiagnostic: matchingPackages.length > 0
+      };
+    });
+
+    // STEP 9: Sort results - pehle woh diagnostics jisme user ke packages hain
+    const sortedDiagnostics = enrichedDiagnostics.sort((a, b) => {
+      // Pehle woh jisme packages hain
+      if (a.hasMyPackages && !b.hasMyPackages) return -1;
+      if (!a.hasMyPackages && b.hasMyPackages) return 1;
+      
+      // Phir jisme zyada matching packages hain
+      if (a.matchingPackageCount > b.matchingPackageCount) return -1;
+      if (a.matchingPackageCount < b.matchingPackageCount) return 1;
+      
+      return 0;
+    });
+
+    // STEP 10: Return Response
+    return res.status(200).json({
+      message: "Company diagnostics filtered by staff's myPackages fetched successfully",
+      data: sortedDiagnostics,
+      count: sortedDiagnostics.length,
+      totalDiagnostics: diagnostics.length,
+      staffPackageInfo: {
+        staffId,
+        totalMyPackages: staffPackageIds.length,
+        packageIds: staffPackageIds,
+        hasPackages: staffPackageIds.length > 0
+      },
+      filterInfo: {
+        appliedFilter: staffPackageIds.length > 0 ? "myPackages" : "none",
+        matchedDiagnostics: sortedDiagnostics.filter(d => d.hasMyPackages).length,
+        unmatchedDiagnostics: sortedDiagnostics.filter(d => !d.hasMyPackages).length
+      },
+      companyInfo: {
+        companyId,
+        companyName: company.companyName,
+        email: company.email
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Error fetching company diagnostics by staff packages:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message
     });
   }
 };

@@ -1,21 +1,19 @@
+// models/xray.model.js
 import mongoose from "mongoose";
 
 const xraySchema = new mongoose.Schema({
-  title: {
-    type: String,
-  },
-  price: {
-    type: Number,
-  },
-  preparation: {
-    type: String,
-  },
-  reportTime: {
-    type: String,
-  },
-  image: {
-    type: String, // This will store the image URL (can be local or cloud-based)
-  }
+  title: String,
+  gender: String,
+  price: Number,
+  preparation: String,
+  reportTime: String,
+  image: String,
+  diagnostics: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Diagnostic"
+    }
+  ]
 }, { timestamps: true });
 
 const Xray = mongoose.model("Xray", xraySchema);

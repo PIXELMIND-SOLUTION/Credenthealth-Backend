@@ -19,6 +19,11 @@ const packageSchema = new mongoose.Schema({
   precautions: {
     type: String // ✅ newly added field
   },
+  gender: { // NEW FIELD
+    type: String,
+    enum: ['Male', 'Female', 'Both'],
+    default: 'Both'
+  },
   includedTests: [
     {
       name: {
@@ -30,6 +35,12 @@ const packageSchema = new mongoose.Schema({
       subTests: {
         type: [String],
       }
+    }
+  ],
+    diagnostics: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Diagnostic', // Assuming your diagnostic model name is 'Diagnostic'
     }
   ],
   createdAt: {

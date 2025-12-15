@@ -28,6 +28,9 @@ import Counter from "../Models/Counter.js";
 import moment from "moment-timezone";
 import crypto from "crypto"; // ✅ Add this import at the top
 import SupportTicket from "../Models/SupportTicket.js";
+import { HraSubmission } from "../Models/HraSubmission.js";
+import SimpleQuestion from "../Models/SimpleQuestion.js";
+import Company from "../Models/companyModel.js";
 
 
 dotenv.config();
@@ -41,43 +44,172 @@ const __dirname = path.dirname(__filename);
 
 
 
-// Staff login function (Authentication)
+
 export const staffLogin = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, acceptTermsAndConditions } = req.body;
 
-    // Find staff by email from the database
+    // 1️⃣ Find staff by email
     const staff = await Staff.findOne({ email });
 
     if (!staff) {
-      return res.status(400).json({ message: 'Staff not found' });
+      return res.status(400).json({ message: "Staff not found" });
     }
 
-    // Check if the password matches (Note: You should hash the password in a real app)
+    // 2️⃣ Check password
     if (staff.password !== password) {
-      return res.status(400).json({ message: 'Invalid credentials' });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    // Log the staff _id (staffId)
-    console.log("Staff ID: ", staff._id.toString()); // Log the real staff ID here
+    // 3️⃣ Check / update T&C
+    if (!staff.termsAndConditionsAccepted) {
+      if (!acceptTermsAndConditions) {
+        return res
+          .status(400)
+          .json({ message: "Terms and conditions must be accepted to login" });
+      }
 
-    // Generate token for the authenticated staff
+      staff.termsAndConditionsAccepted = true;
+      staff.termsAcceptedAt = new Date();
+      await staff.save();
+
+      console.log(
+        `✅ Staff (${staff.email}) accepted terms at: ${staff.termsAcceptedAt}`
+      );
+    } else {
+      console.log(
+        `ℹ️ Staff (${staff.email}) already accepted terms on ${staff.termsAcceptedAt}`
+      );
+    }
+
+    // 4️⃣ Generate login token
     const token = generateToken(staff._id);
 
-    // Send response with the real staff object and token
-    res.status(200).json({
-      message: 'Login successful',
-      token, // Token included here
-      staff // Send the complete real staff object here
+    // 5️⃣ Find which company this staff belongs to (search in company.staff array)
+    let companyId = null;
+    let companyName = null;
+    
+    // Search in all companies for this staff ID
+    const company = await Company.findOne({ 
+      "staff._id": staff._id 
     });
 
+    if (company) {
+      companyId = company._id;
+      companyName = company.companyName || company.name;
+      
+      console.log(`🏢 Company Found: ${companyName} (${companyId})`);
+      console.log(`👤 Updating staff inside company: ${staff.name}`);
+
+      // Update staff in company array
+      const staffIndex = company.staff.findIndex(
+        (s) => s._id.toString() === staff._id.toString()
+      );
+
+      if (staffIndex >= 0) {
+        company.staff[staffIndex].termsAndConditionsAccepted = staff.termsAndConditionsAccepted;
+        company.staff[staffIndex].termsAcceptedAt = staff.termsAcceptedAt;
+        
+        console.log(
+          `🔄 Updated company.staff entry for ${staff.name} -> T&C: ${staff.termsAndConditionsAccepted}`
+        );
+        
+        await company.save();
+        console.log(`💾 Company (${companyName}) saved with updated staff terms.`);
+      }
+    } else {
+      console.log(`❌ No company found for staff: ${staff.name}`);
+      
+      // Optional: Try to find company by staff email domain or other method
+      const emailDomain = email.split('@')[1];
+      if (emailDomain) {
+        const companyByDomain = await Company.findOne({
+          $or: [
+            { companyEmail: { $regex: emailDomain, $options: 'i' } },
+            { email: { $regex: emailDomain, $options: 'i' } }
+          ]
+        });
+        
+        if (companyByDomain) {
+          console.log(`⚠️ Staff not in company.staff array, but found company by email domain: ${companyByDomain.companyName}`);
+        }
+      }
+    }
+
+    // 6️⃣ Prepare response
+    const response = {
+      message: "Login successful",
+      token,
+      staff: {
+        _id: staff._id,
+        name: staff.name,
+        email: staff.email,
+        role: staff.role,
+        gender: staff.gender,
+        age: staff.age,
+        profileImage: staff.profileImage,
+        department: staff.department,
+        employeeId: staff.employeeId,
+        wallet_balance: staff.wallet_balance,
+        termsAndConditionsAccepted: staff.termsAndConditionsAccepted,
+        termsAcceptedAt: staff.termsAcceptedAt,
+        // Add companyId to staff object in response
+        companyId: companyId || null
+      },
+      // Also add company info at root level
+      companyInfo: companyId ? {
+        companyId,
+        companyName
+      } : null
+    };
+
+    // 7️⃣ Send login response
+    res.status(200).json(response);
+
   } catch (error) {
-    // Log the error for debugging
-    console.error('Error during staff login:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    console.error("🔥 Error during staff login:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
+
+
+// FCM token save endpoint
+export const saveFcmToken = async (req, res) => {
+  const { staffId, fcmToken } = req.body;
+
+  try {
+    // Staff document update karo FCM token ke saath
+    const updatedStaff = await Staff.findByIdAndUpdate(
+      staffId,
+      { 
+        fcmToken: fcmToken,
+        fcmTokenUpdatedAt: new Date()
+      },
+      { new: true }
+    );
+
+    if (!updatedStaff) {
+      return res.status(404).json({
+        success: false,
+        message: 'Staff not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'FCM token saved successfully',
+      staff: updatedStaff
+    });
+  } catch (error) {
+    console.error('Error saving FCM token:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error saving FCM token',
+      error: error.message
+    });
+  }
+};
 
 
 
@@ -654,11 +786,11 @@ export const removeFamilyMember = async (req, res) => {
 
 
 
-
+// Add this at the top of your file
+const staffProfileDir = path.join(__dirname, '../uploads/staffprofile');
 
 // Define the staff profile directory
 
-// Multer storage config
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     fs.mkdirSync(staffProfileDir, { recursive: true });
@@ -674,6 +806,7 @@ const upload = multer({
   storage: storage,
   limits: { fileSize: 5 * 1024 * 1024 },
 }).single('profileImage');
+
 
 // Controller
 export const uploadProfileImage = (req, res) => {
@@ -728,38 +861,25 @@ export const uploadProfileImage = (req, res) => {
 
 export const updateProfileImage = (req, res) => {
   upload(req, res, async (err) => {
-    if (err) {
-      return res.status(400).json({ message: 'Error uploading file', error: err.message });
-    }
+    if (err) return res.status(400).json({ message: 'Error uploading file', error: err.message });
 
     try {
       const { staffId } = req.params;
       const staff = await Staff.findById(staffId);
+      if (!staff) return res.status(404).json({ message: 'Staff not found' });
 
-      if (!staff) {
-        return res.status(404).json({ message: 'Staff not found' });
-      }
-
-      // If a new file is uploaded
       if (req.file) {
-        // Delete old image if exists
+        // Delete old image
         if (staff.profileImage) {
-          const oldFilePath = path.join(staffProfileDir, staff.profileImage);
-          fs.promises.unlink(oldFilePath).catch((err) => {
-            console.error('Error deleting old image:', err);
-          });
+          const oldFilePath = path.join(staffProfileDir, path.basename(staff.profileImage));
+          fs.promises.unlink(oldFilePath).catch(err => console.error('Error deleting old image:', err));
         }
 
-        // Update with new image
-        staff.profileImage = req.file.filename;
+        // Store full URL in DB
+        staff.profileImage = `${req.protocol}://${req.get('host')}/uploads/staffprofile/${req.file.filename}`;
       }
 
-      // Save staff (whether image was updated or not)
       await staff.save();
-
-      const imageUrl = staff.profileImage
-        ? `${req.protocol}://${req.get('host')}/uploads/staffprofile/${staff.profileImage}`
-        : null;
 
       res.status(200).json({
         message: req.file ? 'Profile image updated successfully' : 'No image uploaded, existing image retained',
@@ -769,7 +889,7 @@ export const updateProfileImage = (req, res) => {
           contact_number: staff.contact_number,
           address: staff.address,
           role: staff.role,
-          profileImage: imageUrl,
+          profileImage: staff.profileImage,
           createdAt: staff.createdAt,
           updatedAt: staff.updatedAt,
         },
@@ -780,7 +900,6 @@ export const updateProfileImage = (req, res) => {
     }
   });
 };
-
 
 
 export const getMyProfile = async (req, res) => {
@@ -812,6 +931,7 @@ export const getMyProfile = async (req, res) => {
         family_members: staff.family_members,
         doctorAppointments: staff.doctorAppointments,
         myBookings: staff.myBookings,
+        profileImage: staff.profileImage,
         wallet_logs: staff.wallet_logs,
         createdAt: staff.createdAt,
         updatedAt: staff.updatedAt,
@@ -822,6 +942,121 @@ export const getMyProfile = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
+
+
+
+export const getProfileStaff = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+
+    // Include employeeId also in selected fields
+    const staff = await Staff.findById(
+      staffId,
+      'name email contact_number role profileImage age gender department height eyeSight weight userId BP BMI eyeCheckupResults createdAt updatedAt employeeId'
+    );
+
+    if (!staff) {
+      return res.status(404).json({ message: 'Staff not found' });
+    }
+
+    res.status(200).json({
+      message: 'Staff profile fetched successfully',
+      staff: {
+        _id: staff._id,
+        userId: staff.userId,
+        employeeId: staff.employeeId,   // ✅ employeeId added
+        name: staff.name,
+        email: staff.email,
+        contact_number: staff.contact_number,
+        role: staff.role,
+        profileImage: staff.profileImage || null,
+        age: staff.age || null,
+        gender: staff.gender || null,
+        department: staff.department || null,
+        height: staff.height || null,
+        weight: staff.weight || null,
+        BP: staff.BP || null,
+        BMI: staff.BMI || null,
+        eyeCheckupResults: staff.eyeCheckupResults || null,
+        eyeSight: staff.eyeSight || null,
+        createdAt: staff.createdAt,
+        updatedAt: staff.updatedAt,
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching staff:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+
+export const editProfileStaff = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+
+    // Fields that can be updated
+    const {
+      employeeId,      // ✅ added employeeId
+      name,
+      email,
+      contact_number,
+      role,
+      age,
+      gender,
+      department,
+      height,
+      weight,
+      BP,
+      BMI,
+      eyeCheckupResults,
+      eyeSight
+    } = req.body;
+
+    // Build update object
+    const update = {
+      employeeId,
+      name,
+      email,
+      contact_number,
+      role,
+      age,
+      gender,
+      department,
+      height,
+      weight,
+      BP,
+      BMI,
+      eyeCheckupResults,
+      eyeSight
+    };
+
+    // Remove undefined keys so we don't overwrite with undefined
+    Object.keys(update).forEach(
+      key => update[key] === undefined && delete update[key]
+    );
+
+    const updatedStaff = await Staff.findByIdAndUpdate(
+      staffId,
+      update,
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedStaff) {
+      return res.status(404).json({ message: 'Staff not found' });
+    }
+
+    res.status(200).json({
+      message: 'Staff profile updated successfully',
+      staff: updatedStaff,
+    });
+  } catch (error) {
+    console.error('Error updating staff:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
 
 
 
@@ -1238,59 +1473,117 @@ export const getStaffTestPackageById = async (req, res) => {
   const { staffId } = req.params;
 
   try {
+    // 1️⃣ Get staff gender
+    const staff = await Staff.findById(staffId)
+      .select("gender")
+      .lean();
+    if (!staff) {
+      return res.status(404).json({ success: false, message: "Staff member not found." });
+    }
+    const staffGender = staff.gender;
+
+    // 2️⃣ Fetch staff's packages/tests/scans with populates
     const staffMember = await Staff.findById(staffId)
+      .select("myPackages myTests myScans")
       .populate({
-        path: 'myPackages.diagnosticId',
-        model: 'Diagnostic',
-        select: 'name address centerType email phone',
+        path: "myPackages.diagnosticId",
+        model: "Diagnostic",
+        select: "name address centerType email phone image",
       })
       .populate({
-        path: 'myPackages.packageId',
-        model: 'Package',
+        path: "myPackages.packageId",
+        model: "Package",
+      })
+      .populate({
+        path: "myTests.testId",
+        model: "Test",
+      })
+      .populate({
+        path: "myTests.diagnosticId",
+        model: "Diagnostic",
+        select: "name",
+      })
+      .populate({
+        path: "myScans.scanId",
+        model: "Xray",
+      })
+      .populate({
+        path: "myScans.diagnosticId",
+        model: "Diagnostic",
+        select: "name",
       })
       .lean();
 
     if (!staffMember) {
-      return res.status(404).json({ message: 'Staff member not found.' });
+      return res.status(404).json({ success: false, message: "Staff data not found." });
     }
 
-    const expandedPackages = staffMember.myPackages.map((pkg) => {
+    // 3️⃣ Filter packages by gender rule
+    const allowedPackages = (staffMember.myPackages || []).filter(pkg => {
+      const fullPkg = pkg.packageId || {};
+      const pkgGender = fullPkg.gender;            // expect "Male" / "Female" / "Both"
+      if (!pkgGender) {
+        // agar package me gender defined nahi hai — skip kar do
+        return false;
+      }
+      if (pkgGender === "Both") return true;
+      return pkgGender === staffGender;
+    });
+
+    if (allowedPackages.length === 0) {
+      // 🛑 Agar no package match hua — bhej custom message
+      return res.status(200).json({
+        success: true,
+        message: "No packages available for your gender.",
+        myPackages: [],
+        myTests: staffMember.myTests,
+        myScans: staffMember.myScans
+      });
+    }
+
+    // 4️⃣ Expand allowed packages for response
+    const expandedPackages = allowedPackages.map(pkg => {
       const diagnostic = pkg.diagnosticId || {};
       const fullPackage = pkg.packageId || {};
 
       return {
         _id: pkg._id,
-        packageId: fullPackage._id || pkg.packageId,
-        packageName: fullPackage.name || pkg.packageName || '',
-        price: pkg.price || fullPackage.price || 0,
+        packageId: fullPackage._id || null,
+        packageName: fullPackage.name || "",
+        price: fullPackage.price || 0,
         offerPrice: pkg.offerPrice || 0,
-        doctorInfo: fullPackage.doctorInfo || '',
+        gender: fullPackage.gender,  // here we return the package's gender
+        doctorInfo: fullPackage.doctorInfo || "",
         totalTestsIncluded: fullPackage.totalTestsIncluded || 0,
-        description: fullPackage.description || '',
-        precautions: fullPackage.precautions || '',
+        description: fullPackage.description || "",
+        precautions: fullPackage.precautions || "",
         includedTests: fullPackage.includedTests || [],
         tests: pkg.tests || [],
         diagnosticCenter: {
-          name: diagnostic?.name || '',
-          address: diagnostic?.address || '',
-          email: diagnostic?.email || '',
-          phone: diagnostic?.phone || '',
-          centerType: diagnostic?.centerType || '',
+          diagnosticId: diagnostic._id || "",
+          name: diagnostic.name || "",
+          address: diagnostic.address || "",
+          email: diagnostic.email || "",
+          phone: diagnostic.phone || "",
+          centerType: diagnostic.centerType || "",
+          image: diagnostic.image || "",
         }
       };
     });
 
     res.status(200).json({
-      message: '✅ Packages fetched successfully.',
-      myPackages: expandedPackages
+      success: true,
+      message: "Staff packages, tests, and scans fetched successfully.",
+      myPackages: expandedPackages,
+      myTests: staffMember.myTests,
+      myScans: staffMember.myScans
     });
 
   } catch (error) {
-    console.error('❌ Error fetching packages:', error);
-    res.status(500).json({ message: 'Server error while fetching packages.' });
+    console.error("Error fetching staff data:", error);
+    res.status(500).json({ success: false, message: "Server error while fetching staff data.", error: error.message });
   }
 };
-
 
 export const getSingleStaffTestPackage = async (req, res) => {
   const { staffId, packageId } = req.params;
@@ -1539,6 +1832,191 @@ export const getStaffPackages = async (req, res) => {
     return res.status(500).json({ message: "Internal server error", error: error.message });
   }
 };
+
+export const getStaffScans = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+    if (!staffId) {
+      return res.status(400).json({ success: false, message: "staffId is required in params." });
+    }
+
+    // 1. Get staff gender
+    const staff = await Staff.findById(staffId).select("gender").lean();
+    if (!staff) {
+      return res.status(404).json({ success: false, message: "Staff not found" });
+    }
+    const staffGender = staff.gender;
+
+    // 2. Fetch staff scans with populated scan details
+    const staffWithScans = await Staff.findById(staffId)
+      .select("myScans")
+      .populate({
+        path: "myScans.scanId",
+        model: "Xray"
+      })
+      .populate({
+        path: "myScans.diagnosticId",
+        model: "Diagnostic",
+        select: "name image address description"
+      })
+      .lean();
+
+    const allScans = (staffWithScans.myScans || []).map(item => {
+      return {
+        diagnosticId: item.diagnosticId,
+        scanId: item.scanId,
+        title: item.title,
+        price: item.price,
+        preparation: item.preparation,
+        reportTime: item.reportTime,
+        image: item.image,
+        _id: item._id
+      };
+    });
+
+    // 3. Filter scans based on gender rule
+    const genderFiltered = allScans.filter(item => {
+      const scan = item.scanId;
+      
+      if (!scan) return false;
+      
+      // Agar gender field hi nahi hai to show nahi karna
+      if (scan.gender === undefined || scan.gender === null) {
+        return false;
+      }
+      
+      const scanGender = scan.gender;
+      
+      // If scan gender is "Both", show to all
+      if (scanGender === "Both") return true;
+      
+      // If scan gender matches staff gender, show
+      return scanGender === staffGender;
+    });
+
+    // 4. REMOVE DUPLICATES - ek hi scan sirf ek hi baar show karna hai
+    const uniqueScans = [];
+    const seenScanIds = new Set();
+
+    genderFiltered.forEach(item => {
+      const scanId = item.scanId?._id?.toString();
+      
+      if (scanId && !seenScanIds.has(scanId)) {
+        seenScanIds.add(scanId);
+        uniqueScans.push(item);
+      }
+    });
+
+    // Debug ke liye
+    console.log(`Staff Gender: ${staffGender}`);
+    console.log(`Total scans before filter: ${allScans.length}`);
+    console.log(`Gender filtered scans: ${genderFiltered.length}`);
+    console.log(`Unique scans after deduplication: ${uniqueScans.length}`);
+    
+    uniqueScans.forEach(item => {
+      console.log(`Scan: ${item.scanId?.title}, Gender: ${item.scanId?.gender}`);
+    });
+
+    // Return in the format frontend expects
+    res.status(200).json({
+      success: true,
+      message: "Staff scans fetched successfully",
+      data: uniqueScans
+    });
+
+  } catch (error) {
+    console.error("Error in getStaffScans:", error);
+    res.status(500).json({ success: false, message: "Server error", error: error.message });
+  }
+};
+
+export const getStaffTests = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+
+    if (!staffId) {
+      return res.status(400).json({ message: "staffId is required in params." });
+    }
+
+    const staff = await Staff.findById(staffId)
+      .select("gender myTests")
+      .lean();
+
+    if (!staff) {
+      return res.status(404).json({ message: "Staff not found" });
+    }
+
+    const staffGender = staff.gender;
+
+    const fullStaff = await Staff.findById(staffId)
+      .select("myTests")
+      .populate({
+        path: "myTests.testId",
+        model: "Test"
+      })
+      .populate({
+        path: "myTests.diagnosticId",
+        model: "Diagnostic",
+        select: "name"
+      })
+      .lean();
+
+    // Get all tests with ALL their diagnostics
+    const allTests = [];
+    
+    if (fullStaff.myTests && fullStaff.myTests.length > 0) {
+      // Group by testId to combine all diagnostics
+      const testMap = new Map();
+      
+      fullStaff.myTests.forEach(item => {
+        const test = item.testId;
+        if (!test) return;
+        
+        const testGender = test.gender;
+        
+        // Gender filter
+        if (testGender && testGender !== "Both" && testGender !== staffGender) {
+          return;
+        }
+        
+        const testId = test._id.toString();
+        
+        if (!testMap.has(testId)) {
+          // First time seeing this test
+          testMap.set(testId, {
+            ...item,
+            allDiagnostics: [{
+              _id: item.diagnosticId?._id || item.diagnosticId,
+              name: item.diagnosticId?.name || 'Unknown Diagnostic'
+            }]
+          });
+        } else {
+          // Already exists, add diagnostic to array
+          const existing = testMap.get(testId);
+          existing.allDiagnostics.push({
+            _id: item.diagnosticId?._id || item.diagnosticId,
+            name: item.diagnosticId?.name || 'Unknown Diagnostic'
+          });
+        }
+      });
+      
+      allTests.push(...Array.from(testMap.values()));
+    }
+
+    return res.status(200).json({
+      message: "Filtered staff tests fetched successfully",
+      data: allTests
+    });
+
+  } catch (error) {
+    console.error("Error fetching staff tests:", error);
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message
+    });
+  }
+};
+
 
 
 
@@ -2142,6 +2620,11 @@ export const createBookingFromStaffCart = async (req, res) => {
       addressId
     } = req.body;
 
+    console.log("=== STARTING BOOKING PROCESS ===");
+    console.log("Staff ID:", staffId);
+    console.log("Diagnostic ID:", diagnosticId);
+    console.log("Service Type:", serviceType);
+
     // Validate service type
     if (!["Home Collection", "Center Visit"].includes(serviceType)) {
       return res.status(400).json({
@@ -2168,6 +2651,26 @@ export const createBookingFromStaffCart = async (req, res) => {
       });
     }
 
+    // Find diagnostic centre - IMPORTANT!
+    console.log("Fetching diagnostic with ID:", diagnosticId);
+    const diagnostic = await Diagnostic.findById(diagnosticId);
+    if (!diagnostic) {
+      console.error("❌ Diagnostic not found for ID:", diagnosticId);
+      return res.status(404).json({
+        message: "Diagnostic centre not found",
+        isSuccessfull: false
+      });
+    }
+
+    // DEBUG: Check diagnostic data
+    console.log("✅ Diagnostic found:");
+    console.log("- Name:", diagnostic.name);
+    console.log("- Email:", diagnostic.email);
+    console.log("- Phone:", diagnostic.phone);
+    console.log("- Address:", diagnostic.address);
+    console.log("- City:", diagnostic.city);
+    console.log("- State:", diagnostic.state);
+
     // Calculate price
     const totalPrice =
       staffCart.totalPrice ??
@@ -2176,6 +2679,8 @@ export const createBookingFromStaffCart = async (req, res) => {
         0
       );
     const payableAmount = staffCart.payableAmount ?? totalPrice;
+
+    console.log("Price calculated - Total:", totalPrice, "Payable:", payableAmount);
 
     // Wallet + Payment logic
     let walletUsed = 0;
@@ -2188,11 +2693,13 @@ export const createBookingFromStaffCart = async (req, res) => {
       walletUsed = payableAmount;
       staff.wallet_balance -= walletUsed;
       staff.forTests -= walletUsed;
+      console.log("Full payment from wallet:", walletUsed);
     } else {
       walletUsed = availableBalance;
       onlinePaymentUsed = payableAmount - availableBalance;
       staff.wallet_balance -= walletUsed;
       staff.forTests = 0;
+      console.log("Partial wallet payment:", walletUsed, "Online:", onlinePaymentUsed);
 
       if (!transactionId) {
         return res.status(402).json({
@@ -2256,9 +2763,11 @@ export const createBookingFromStaffCart = async (req, res) => {
     }
 
     await staff.save();
+    console.log("✅ Staff wallet updated");
 
     // Generate unique booking ID
     const diagnosticBookingId = await generateDiagnosticBookingId();
+    console.log("Generated Booking ID:", diagnosticBookingId);
 
     // Safe date formatting
     const bookingDate = moment(date, [
@@ -2299,36 +2808,36 @@ export const createBookingFromStaffCart = async (req, res) => {
       paymentStatus,
       paymentDetails,
       isSuccessfull: true,
-      addressId: serviceType === "Home Collection" ? addressId : null // Add addressId condition
+      addressId: serviceType === "Home Collection" ? addressId : null
     });
 
     const savedBooking = await booking.save();
+    console.log("✅ Booking saved to DB with ID:", savedBooking._id);
 
     // Mark diagnostic slot as booked
-    const diagnostic = await Diagnostic.findById(diagnosticId);
-    if (diagnostic) {
-      let updated = false;
+    let updated = false;
+    const updateSlots = (slots) =>
+      slots.map(slot => {
+        if (
+          slot.date === bookingDate &&
+          slot.timeSlot === timeSlot &&
+          !slot.isBooked
+        ) {
+          slot.isBooked = true;
+          updated = true;
+        }
+        return slot;
+      });
 
-      const updateSlots = (slots) =>
-        slots.map(slot => {
-          if (
-            slot.date === bookingDate &&
-            slot.timeSlot === timeSlot &&
-            !slot.isBooked
-          ) {
-            slot.isBooked = true;
-            updated = true;
-          }
-          return slot;
-        });
+    if (serviceType === "Home Collection") {
+      diagnostic.homeCollectionSlots = updateSlots(diagnostic.homeCollectionSlots);
+    } else if (serviceType === "Center Visit") {
+      diagnostic.centerVisitSlots = updateSlots(diagnostic.centerVisitSlots);
+    }
 
-      if (serviceType === "Home Collection") {
-        diagnostic.homeCollectionSlots = updateSlots(diagnostic.homeCollectionSlots);
-      } else if (serviceType === "Center Visit") {
-        diagnostic.centerVisitSlots = updateSlots(diagnostic.centerVisitSlots);
-      }
-
-      if (updated) await diagnostic.save();
+    if (updated) {
+      await diagnostic.save();
+      console.log("✅ Diagnostic slots updated");
     }
 
     // Notification
@@ -2339,30 +2848,165 @@ export const createBookingFromStaffCart = async (req, res) => {
       bookingId: savedBooking._id,
     });
     await staff.save();
+    console.log("✅ Notification added to staff");
+
+    // Get primary contact person details
+    let contactPersonInfo = "";
+    let primaryContact = null;
+    
+    if (diagnostic.contactPersons && diagnostic.contactPersons.length > 0) {
+      primaryContact = diagnostic.contactPersons[0];
+      console.log("✅ Contact person found:", primaryContact.name);
+      
+      contactPersonInfo = `
+        <div style="margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px;">
+          <p style="margin: 5px 0;"><strong>📞 Primary Contact Person:</strong></p>
+          <p style="margin: 5px 0;"><strong>Name:</strong> ${primaryContact.name || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Designation:</strong> ${primaryContact.designation || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Contact Number:</strong> ${primaryContact.contactNumber || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Contact Email:</strong> ${primaryContact.contactEmail || "N/A"}</p>
+        </div>
+      `;
+    } else {
+      console.log("⚠️ No contact persons found for diagnostic");
+    }
+
+    // Get address based on service type
+    let serviceAddress = "";
+    if (serviceType === "Home Collection") {
+      // Home Collection के लिए staff address
+      serviceAddress = `
+        <p><strong>🏠 Home Collection Address:</strong></p>
+        <p>${staff.address || "Address will be shared by the diagnostic center"}</p>
+        <p><em>Our representative will visit this address for sample collection</em></p>
+      `;
+    } else {
+      // Center Visit के लिए diagnostic centre का address
+      serviceAddress = `
+        <p><strong>📍 Diagnostic Centre Address:</strong></p>
+        <p><strong>Address:</strong> ${diagnostic.address || "Address not available"}</p>
+        <p><strong>City:</strong> ${diagnostic.city || "N/A"}</p>
+        <p><strong>State:</strong> ${diagnostic.state || "N/A"}</p>
+        <p><strong>Pincode:</strong> ${diagnostic.pincode || "N/A"}</p>
+        <p><em>Please visit the center at your scheduled time</em></p>
+      `;
+    }
+
+    // Debug email content
+    console.log("=== EMAIL CONTENT PREVIEW ===");
+    console.log("Diagnostic Name to include:", diagnostic.name);
+    console.log("Diagnostic Email to include:", diagnostic.email);
+    console.log("Diagnostic Phone to include:", diagnostic.phone);
+    console.log("Diagnostic Address to include:", diagnostic.address);
+    console.log("Contact Person Info:", contactPersonInfo ? "Yes" : "No");
+    console.log("Service Type:", serviceType);
+    console.log("Service Address Preview:", serviceAddress.substring(0, 100));
+    console.log("=== END PREVIEW ===");
+
+    // Build email HTML with ALL diagnostic details
+    const emailHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Booking Confirmation - Credent Health</title>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; color: white; border-radius: 8px 8px 0 0; }
+          .content { padding: 20px; background-color: #fff; }
+          .section { background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid; }
+          .booking-section { border-left-color: #3498db; }
+          .diagnostic-section { border-left-color: #2ecc71; }
+          .address-section { border-left-color: #9b59b6; }
+          .user-section { border-left-color: #e74c3c; }
+          .full-address-section { border-left-color: #f39c12; }
+          .notes-section { background-color: #e8f4f8; padding: 15px; border-left: 4px solid #3498db; margin: 20px 0; }
+          .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 14px; }
+          h1, h2, h3 { color: #2c3e50; }
+          strong { color: #2c3e50; }
+          ul { margin: 10px 0; padding-left: 20px; }
+          li { margin-bottom: 5px; }
+          .contact-box { margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1 style="margin: 0; color: white;">Diagnostics Booking Confirmed!</h1>
+        </div>
+        
+        <div class="content">
+          <p>Hello <strong>${staff.name}</strong>,</p>
+          <p>Your diagnostic booking has been successfully confirmed. Here are the complete details:</p>
+          
+          <!-- Booking Summary -->
+          <div class="section booking-section">
+            <h3 style="margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px;">📋 Booking Summary</h3>
+            <p><strong>Booking ID:</strong> ${diagnosticBookingId}</p>
+            <p><strong>Booking Date:</strong> ${moment(bookingDate).format('DD MMM YYYY')}</p>
+            <p><strong>Time Slot:</strong> ${timeSlot}</p>
+            <p><strong>Service Type:</strong> ${serviceType}</p>
+            <p><strong>Total Amount:</strong> ₹${totalPrice}</p>
+            ${staffCart.discount ? `<p><strong>Discount Applied:</strong> ₹${staffCart.discount}</p>` : ''}
+            <p><strong>Paid Amount:</strong> ₹${payableAmount}</p>
+            <p><strong>Payment Mode:</strong> ${walletUsed > 0 ? 'Wallet' + (onlinePaymentUsed > 0 ? ' + Online' : '') : 'Online Payment'}</p>
+            ${walletUsed > 0 ? `<p><strong>Wallet Used:</strong> ₹${walletUsed}</p>` : ''}
+            ${onlinePaymentUsed > 0 ? `<p><strong>Online Payment:</strong> ₹${onlinePaymentUsed}</p>` : ''}
+          </div>
+          
+          <!-- Diagnostic Centre Details - यहाँ diagnostic का सारा data है -->
+          <div class="section diagnostic-section">
+            <h3 style="margin-top: 0; border-bottom: 2px solid #2ecc71; padding-bottom: 10px;">🏥 Diagnostic Centre Details</h3>
+            <p><strong>Centre Name:</strong> ${diagnostic.name || "Neuberg Anand"}</p>
+            <p><strong>Centre Email:</strong> ${diagnostic.email || "credenthealth@gmail.com"}</p>
+            <p><strong>Centre Phone:</strong> ${diagnostic.phone || "7619196856"}</p>
+            
+            ${contactPersonInfo}
+          </div>
+          
+          
+          <!-- Diagnostic Centre -->
+          <div class="section full-address-section">
+            <h3 style="margin-top: 0; border-bottom: 2px solid #f39c12; padding-bottom: 10px;">🏢 Diagnostic Centre Address</h3>
+            <p><strong>Address:</strong><br>${diagnostic.address || "Anand Tower, 54, Bowring Hospital Rd, Tasker Town, Shivaji Nagar, Bengaluru, Karnataka 560001"}</p>
+            <p><strong>Location:</strong> ${diagnostic.city || "Bengaluru"}, ${diagnostic.state || "Karnataka"} - ${diagnostic.pincode || "560001"}</p>
+            <p><strong>Country:</strong> ${diagnostic.country || "India"}</p>
+          </div>
+          
+          <div class="footer">
+            <p>For any assistance with this booking, contact our support team at support@credenthealth.com</p>
+            <p>Thank you for choosing Credent Health!</p>
+            <p><strong>Team CredentHealth</strong></p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    // Final debug check
+    console.log("=== FINAL EMAIL VERIFICATION ===");
+    console.log("Email recipient:", staff.email);
+    console.log("Contains 'Neuberg Anand':", emailHtml.includes("Neuberg Anand"));
+    console.log("Contains diagnostic email:", emailHtml.includes(diagnostic.email || "credenthealth@gmail.com"));
+    console.log("Contains diagnostic phone:", emailHtml.includes(diagnostic.phone || "7619196856"));
+    console.log("Contains diagnostic address:", emailHtml.includes(diagnostic.address || "Anand Tower"));
+    console.log("Email HTML length:", emailHtml.length, "characters");
+    console.log("=== END VERIFICATION ===");
 
     // Email
     const mailOptions = {
       from: `"Credent Health" <${process.env.EMAIL}>`,
       to: staff.email,
-      subject: "Your Diagnostics Booking is Confirmed",
-      html: `
-        <h2>Diagnostics Booking Confirmed</h2>
-        <p>Hello ${staff.name},</p>
-        <p>Your diagnostic booking has been successfully confirmed.</p>
-        <p><strong>Booking ID:</strong> ${diagnosticBookingId}</p>
-        <p><strong>Date:</strong> ${bookingDate}</p>
-        <p><strong>Time Slot:</strong> ${timeSlot}</p>
-        <p><strong>Service Type:</strong> ${serviceType}</p>
-        <p><strong>Paid Amount:</strong> ₹${payableAmount}</p>
-        <br>
-        <p>Thank you,<br>Team CredentHealth</p>
-      `
+      subject: `Diagnostics Booking Confirmed - ${diagnosticBookingId}`,
+      html: emailHtml
     };
 
     try {
       await transporter.sendMail(mailOptions);
+      console.log("✅ EMAIL SENT SUCCESSFULLY to:", staff.email);
+      console.log("✅ Diagnostic details WERE INCLUDED in the email");
     } catch (err) {
-      console.error("Email sending failed:", err);
+      console.error("❌ Email sending failed:", err);
     }
 
     return res.status(201).json({
@@ -2374,10 +3018,14 @@ export const createBookingFromStaffCart = async (req, res) => {
       walletBalance: staff.wallet_balance,
       forTestsBalance: staff.forTests,
       booking: savedBooking,
+      diagnosticIncluded: true, // Confirm diagnostic was included
+      diagnosticName: diagnostic.name,
+      diagnosticEmail: diagnostic.email
     });
 
   } catch (err) {
-    console.error("Error creating booking:", err);
+    console.error("❌ Error creating booking:", err);
+    console.error("Error stack:", err.stack);
     res.status(500).json({
       message: "Server error",
       isSuccessfull: false,
@@ -2385,7 +3033,6 @@ export const createBookingFromStaffCart = async (req, res) => {
     });
   }
 };
-
 
 
 export const rescheduleDiagnosticBooking = async (req, res) => {
@@ -2486,22 +3133,32 @@ export const rescheduleDiagnosticBooking = async (req, res) => {
       await staff.save();
 
       // Send email
-      const mailOptions = {
-        from: `"Credent Health" <${process.env.EMAIL}>`,
-        to: staff.email,
-        subject: "Your Diagnostics Booking has been Rescheduled",
-        html: `
-          <h2>Booking Rescheduled</h2>
-          <p>Hello ${staff.name},</p>
-          <p>Your diagnostic booking has been rescheduled.</p>
-          <p><strong>Booking ID:</strong> ${booking.diagnosticBookingId}</p>
-          <p><strong>New Date:</strong> ${parsedNewDate}</p>
-          <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
-          <p><strong>Service Type:</strong> ${booking.serviceType}</p>
-          <br>
-          <p>Thank you,<br>Team CredentHealth</p>
-        `
-      };
+      // Send email
+const mailOptions = {
+  from: `"Credent Health" <${process.env.EMAIL}>`,
+  to: staff.email,
+  subject: "Your Diagnostics Booking has been Rescheduled",
+  html: `
+    <h2>Booking Rescheduled</h2>
+    <p>Hello ${staff.name},</p>
+    <p>Your diagnostic booking has been rescheduled.</p>
+    <p><strong>Booking ID:</strong> ${booking.diagnosticBookingId}</p>
+    <p><strong>New Date:</strong> ${parsedNewDate}</p>
+    <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
+    <p><strong>Service Type:</strong> ${booking.serviceType}</p>
+    <p><strong>Staff Email:</strong> ${staff.email}</p>
+    <p><strong>Employee ID:</strong> ${staff.employeeId || "N/A"}</p>
+    <br>
+    <p>Thank you,<br>Team CredentHealth</p>
+  `
+};
+
+try {
+  await transporter.sendMail(mailOptions);
+  console.log("✅ Reschedule email sent to:", staff.email);
+} catch (err) {
+  console.error("❌ Email sending failed:", err);
+}
 
       try {
         await transporter.sendMail(mailOptions);
@@ -2526,8 +3183,6 @@ export const rescheduleDiagnosticBooking = async (req, res) => {
     });
   }
 };
-
-
 export const myBookings = async (req, res) => {
   try {
     const staffId = req.params.staffId;
@@ -2542,21 +3197,24 @@ export const myBookings = async (req, res) => {
       .populate("doctorId", "name email image specialization qualification address")
       .lean();
 
+    bookings.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // Store notifications that need to be saved
+    const notificationsToAdd = [];
+
     const populatedBookings = await Promise.all(
       bookings.map(async (booking) => {
-        // ✅ Validate and format date
         let formattedDate = null;
         let bookingDateTime = null;
 
         if (booking.date) {
           const dateObj = new Date(booking.date);
           if (!isNaN(dateObj)) {
-            formattedDate = dateObj.toISOString().split('T')[0]; // 'YYYY-MM-DD'
-            bookingDateTime = new Date(dateObj); // Start with valid date
+            formattedDate = dateObj.toISOString().split('T')[0];
+            bookingDateTime = new Date(dateObj);
           }
         }
 
-        // ✅ Parse timeSlot if valid
         if (bookingDateTime && booking.timeSlot) {
           try {
             const [time, modifier] = booking.timeSlot.split(" ");
@@ -2573,10 +3231,9 @@ export const myBookings = async (req, res) => {
           }
         }
 
-        // ✅ Reminder logic only if bookingDateTime is valid
+        // Reminder logic
         const now = new Date();
         let notifyMsg = null;
-
         if (bookingDateTime && !isNaN(bookingDateTime)) {
           const diffInMs = bookingDateTime - now;
           const diffInHours = diffInMs / (1000 * 60 * 60);
@@ -2591,14 +3248,16 @@ export const myBookings = async (req, res) => {
           }
         }
 
+        // Check if already notified
         const alreadyNotified = staff.notifications?.some(
           (n) =>
             n.bookingId?.toString() === booking._id.toString() &&
             n.message === notifyMsg
         );
 
+        // Add to notifications array if needed
         if (notifyMsg && !alreadyNotified) {
-          staff.notifications.push({
+          notificationsToAdd.push({
             title: "Booking Reminder",
             message: notifyMsg,
             timestamp: new Date(),
@@ -2606,13 +3265,11 @@ export const myBookings = async (req, res) => {
           });
         }
 
-        // ✅ Family member
         const familyMember = staff.family_members?.find(
           (member) =>
             member._id.toString() === booking.familyMemberId?.toString()
         );
 
-        // ✅ Populate cart items
         const populatedItems = booking.cartId?.items?.length
           ? await Promise.all(
             booking.cartId.items.map(async (item) => {
@@ -2634,11 +3291,11 @@ export const myBookings = async (req, res) => {
           meetingLink: booking.meetingLink || null,
           bookedSlot: booking.bookedSlot
             ? {
-              ...booking.bookedSlot,
-              date: booking.bookedSlot.date
-                ? new Date(booking.bookedSlot.date).toISOString().split('T')[0]
-                : null,
-            }
+                ...booking.bookedSlot,
+                date: booking.bookedSlot.date
+                  ? new Date(booking.bookedSlot.date).toISOString().split('T')[0]
+                  : null,
+              }
             : null,
           status: booking.status,
           date: formattedDate || null,
@@ -2652,42 +3309,44 @@ export const myBookings = async (req, res) => {
 
           diagnostic: booking.diagnosticId
             ? {
-              name: booking.diagnosticId.name,
-              description: booking.diagnosticId.description,
-              image: booking.diagnosticId.image,
-              distance: booking.diagnosticId.distance,
-              homeCollection: booking.diagnosticId.homeCollection,
-              centerVisit: booking.diagnosticId.centerVisit,
-              address: booking.diagnosticId.address,
-            }
+              diagnosticId: booking.diagnosticId,
+                name: booking.diagnosticId.name,
+                description: booking.diagnosticId.description,
+                image: booking.diagnosticId.image,
+                distance: booking.diagnosticId.distance,
+                homeCollection: booking.diagnosticId.homeCollection,
+                centerVisit: booking.diagnosticId.centerVisit,
+                address: booking.diagnosticId.address,
+              }
             : null,
 
           package: booking.packageId || null,
 
           patient: familyMember
             ? {
-              name: familyMember.fullName,
-              age: familyMember.age,
-              gender: familyMember.gender,
-              relation: familyMember.relation,
-            }
+                name: familyMember.fullName,
+                age: familyMember.age,
+                gender: familyMember.gender,
+                relation: familyMember.relation,
+              }
             : null,
 
           doctor: booking.doctorId
             ? {
-              name: booking.doctorId.name,
-              email: booking.doctorId.email,
-              image: booking.doctorId.image,
-              specialization: booking.doctorId.specialization,
-              qualification: booking.doctorId.qualification,
-              address: booking.doctorId.address,
-            }
+                name: booking.doctorId.name,
+                email: booking.doctorId.email,
+                image: booking.doctorId.image,
+                specialization: booking.doctorId.specialization,
+                qualification: booking.doctorId.qualification,
+                address: booking.doctorId.address,
+              }
             : null,
 
           staff: {
             name: staff.name,
             email: staff.email,
             contact_number: staff.contact_number,
+            // Branch intentionally excluded as per requirement
           },
 
           cartItems: populatedItems,
@@ -2699,8 +3358,20 @@ export const myBookings = async (req, res) => {
       })
     );
 
-    // Save staff if new notifications added
-    await staff.save();
+    // Only update notifications if there are new ones
+    if (notificationsToAdd.length > 0) {
+      await Staff.findByIdAndUpdate(
+        staffId,
+        { 
+          $push: { 
+            notifications: { 
+              $each: notificationsToAdd 
+            } 
+          } 
+        },
+        { runValidators: false }
+      );
+    }
 
     res.status(200).json({
       success: true,
@@ -2922,7 +3593,7 @@ export const createPackageBooking = async (req, res) => {
       });
     }
 
-    // Fetch staff and package
+    // Fetch staff, package, and diagnostic
     const staff = await Staff.findById(staffId);
     if (!staff) return res.status(404).json({ 
       message: "Staff not found", 
@@ -2934,6 +3605,15 @@ export const createPackageBooking = async (req, res) => {
       message: "Package not found", 
       isSuccessfull: false 
     });
+
+    // ✅ Fetch diagnostic centre details
+    const diagnostic = await Diagnostic.findById(diagnosticId);
+    if (!diagnostic) return res.status(404).json({ 
+      message: "Diagnostic centre not found", 
+      isSuccessfull: false 
+    });
+
+    console.log("✅ Diagnostic found for email:", diagnostic.name);
 
     // Payment calculation
     const payableAmount = packageData.offerPrice || packageData.price;
@@ -3076,7 +3756,6 @@ export const createPackageBooking = async (req, res) => {
     const savedBooking = await booking.save();
 
     // Update diagnostic slots
-    const diagnostic = await Diagnostic.findById(diagnosticId);
     if (diagnostic) {
       const updateSlots = (slots) =>
         slots.map(slot => {
@@ -3107,27 +3786,127 @@ export const createPackageBooking = async (req, res) => {
     });
     await staff.save();
 
-    // Send email
+    // Get contact person details
+    let contactPersonInfo = "";
+    if (diagnostic.contactPersons && diagnostic.contactPersons.length > 0) {
+      const primaryContact = diagnostic.contactPersons[0];
+      contactPersonInfo = `
+        <div style="margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px;">
+          <p style="margin: 5px 0;"><strong>📞 Primary Contact Person:</strong></p>
+          <p style="margin: 5px 0;"><strong>Name:</strong> ${primaryContact.name || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Designation:</strong> ${primaryContact.designation || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Contact Number:</strong> ${primaryContact.contactNumber || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Contact Email:</strong> ${primaryContact.contactEmail || "N/A"}</p>
+        </div>
+      `;
+    }
+
+    // Get address based on service type
+    let serviceAddress = "";
+    if (serviceType === "Home Collection") {
+      // Home Collection के लिए staff address
+      serviceAddress = `
+        <p><strong>🏠 Home Collection Address:</strong></p>
+        <p>${staff.address || "Address will be shared by the diagnostic center"}</p>
+        <p><em>Our representative will visit this address for sample collection</em></p>
+      `;
+    } else {
+      // Center Visit के लिए diagnostic centre का address
+      serviceAddress = `
+        <p><strong>📍 Diagnostic Centre Address:</strong></p>
+        <p><strong>Address:</strong> ${diagnostic.address || "Address not available"}</p>
+        <p><strong>City:</strong> ${diagnostic.city || "N/A"}</p>
+        <p><strong>State:</strong> ${diagnostic.state || "N/A"}</p>
+        <p><strong>Pincode:</strong> ${diagnostic.pincode || "N/A"}</p>
+        <p><em>Please visit the center at your scheduled time</em></p>
+      `;
+    }
+
+    // Send email WITH DIAGNOSTIC DETAILS
     const mailOptions = {
       from: `"Credent Health" <${process.env.EMAIL}>`,
       to: staff.email,
-      subject: "Your Package Booking is Confirmed",
+      subject: `Package Booking Confirmed - ${packageBookingId}`,
       html: `
-        <h2>Package Booking Confirmed</h2>
-        <p>Hello ${staff.name},</p>
-        <p>Your booking for <strong>${packageData.name}</strong> is confirmed.</p>
-        <p><strong>Booking ID:</strong> ${packageBookingId}</p>
-        <p><strong>Date:</strong> ${bookingDate}</p>
-        <p><strong>Time:</strong> ${timeSlot || "N/A"}</p>
-        <p><strong>Service Type:</strong> ${serviceType}</p>
-        <p><strong>Amount Paid:</strong> ₹${payableAmount}</p>
-        <br>
-        <p>Thank you,<br>Team CredentHealth</p>
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Package Booking Confirmation</title>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; color: white; border-radius: 8px 8px 0 0; }
+            .content { padding: 20px; background-color: #fff; }
+            .section { background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid; }
+            .booking-section { border-left-color: #3498db; }
+            .package-section { border-left-color: #9b59b6; }
+            .diagnostic-section { border-left-color: #2ecc71; }
+            .address-section { border-left-color: #f39c12; }
+            .user-section { border-left-color: #e74c3c; }
+            .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 14px; }
+            h1, h2, h3 { color: #2c3e50; }
+            strong { color: #2c3e50; }
+            ul { margin: 10px 0; padding-left: 20px; }
+            li { margin-bottom: 5px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1 style="margin: 0; color: white;">Package Booking Confirmed!</h1>
+          </div>
+          
+          <div class="content">
+            <p>Hello <strong>${staff.name}</strong>,</p>
+            <p>Your health package booking has been successfully confirmed. Here are the complete details:</p>
+            
+            <!-- Booking Summary -->
+            <div class="section booking-section">
+              <h3 style="margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px;">📋 Booking Summary</h3>
+              <p><strong>Package Booking ID:</strong> ${packageBookingId}</p>
+              <p><strong>Diagnostic Booking ID:</strong> ${diagnosticBookingId}</p>
+              <p><strong>Booking Date:</strong> ${moment(bookingDate).format('DD MMM YYYY')}</p>
+              <p><strong>Time Slot:</strong> ${timeSlot || "Will be scheduled"}</p>
+              <p><strong>Service Type:</strong> ${serviceType}</p>
+              <p><strong>Package Amount:</strong> ₹${payableAmount}</p>
+              <p><strong>Payment Mode:</strong> ${walletUsed > 0 ? 'Wallet' + (onlinePaymentUsed > 0 ? ' + Online' : '') : 'Online Payment'}</p>
+              ${walletUsed > 0 ? `<p><strong>Wallet Used:</strong> ₹${walletUsed}</p>` : ''}
+              ${onlinePaymentUsed > 0 ? `<p><strong>Online Payment:</strong> ₹${onlinePaymentUsed}</p>` : ''}
+            </div>
+            
+            <!-- Diagnostic Centre Details -->
+            <div class="section diagnostic-section">
+              <h3 style="margin-top: 0; border-bottom: 2px solid #2ecc71; padding-bottom: 10px;">🏥 Diagnostic Centre Details</h3>
+              <p><strong>Centre Name:</strong> ${diagnostic.name}</p>
+              <p><strong>Official Email:</strong> ${diagnostic.email}</p>
+              <p><strong>Contact Phone:</strong> ${diagnostic.phone}</p>
+              <p><strong>Centre Type:</strong> ${diagnostic.centerType || "Diagnostic"}</p>
+              
+              ${contactPersonInfo}
+            </div>
+            
+            <!-- Diagnostic Centre -->
+            <div class="section">
+              <h4>🏢 Diagnostic Centre Address</h4>
+              <p><strong>Address:</strong><br>${diagnostic.address}</p>
+              <p><strong>Location:</strong> ${diagnostic.city}, ${diagnostic.state} - ${diagnostic.pincode}</p>
+              <p><strong>Country:</strong> ${diagnostic.country}</p>
+            </div>
+
+            <div class="footer">
+              <p>For any assistance with this booking, contact our support team at support@credenthealth.com</p>
+              <p>Thank you for choosing Credent Health!</p>
+              <p><strong>Team CredentHealth</strong></p>
+            </div>
+          </div>
+        </body>
+        </html>
       `
     };
 
     try {
       await transporter.sendMail(mailOptions);
+      console.log("✅ Package booking email sent with diagnostic details to:", staff.email);
     } catch (err) {
       console.error("Email sending failed:", err);
     }
@@ -3140,7 +3919,10 @@ export const createPackageBooking = async (req, res) => {
       remainingWalletBalance: staff.wallet_balance,
       forPackagesBalance: staff.forPackages,
       packageBookingId,
+      diagnosticBookingId,
       booking: savedBooking,
+      diagnosticIncluded: true,
+      diagnosticName: diagnostic.name
     });
 
   } catch (err) {
@@ -3152,7 +3934,6 @@ export const createPackageBooking = async (req, res) => {
     });
   }
 };
-
 
 
 export const reschedulePackageBooking = async (req, res) => {
@@ -3254,23 +4035,24 @@ export const reschedulePackageBooking = async (req, res) => {
       await staff.save();
 
       // Send email
-      const mailOptions = {
-        from: `"Credent Health" <${process.env.EMAIL}>`,
-        to: staff.email,
-        subject: "Your Package Booking has been Rescheduled",
-        html: `
-          <h2>Package Booking Rescheduled</h2>
-          <p>Hello ${staff.name},</p>
-          <p>Your package booking has been successfully rescheduled.</p>
-          <p><strong>Booking ID:</strong> ${booking.packageBookingId}</p>
-          <p><strong>New Date:</strong> ${parsedNewDate}</p>
-          <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
-          <p><strong>Service Type:</strong> ${booking.serviceType}</p>
-          <br>
-          <p>Thank you,<br>Team CredentHealth</p>
-        `
-      };
-
+     const mailOptions = {
+  from: `"Credent Health" <${process.env.EMAIL}>`,
+  to: staff.email,
+  subject: "Your Package Booking has been Rescheduled",
+  html: `
+    <h2>Package Booking Rescheduled</h2>
+    <p>Hello ${staff.name},</p>
+    <p>Your package booking has been successfully rescheduled.</p>
+    <p><strong>Booking ID:</strong> ${booking.packageBookingId}</p>
+    <p><strong>New Date:</strong> ${parsedNewDate}</p>
+    <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
+    <p><strong>Service Type:</strong> ${booking.serviceType}</p>
+    <p><strong>Staff Email:</strong> ${staff.email}</p>
+    <p><strong>Employee ID:</strong> ${staff.employeeId || "N/A"}</p>
+    <br>
+    <p>Thank you,<br>Team CredentHealth</p>
+  `
+};
       try {
         await transporter.sendMail(mailOptions);
         console.log("✅ Reschedule email sent to:", staff.email);
@@ -3747,24 +4529,27 @@ export const createDoctorConsultationBooking = async (req, res) => {
     }
 
     // ✅ Email
-    const mailOptions = {
-      from: `"Credent Health" <${process.env.EMAIL}>`,
-      to: staff.email,
-      subject: "Your Doctor Consultation is Confirmed",
-      html: `
-        <h2>Consultation Booking Confirmed</h2>
-        <p>Hello ${staff.name},</p>
-        <p>Your consultation with <strong>Dr. ${doctor.name}</strong> has been successfully booked.</p>
-        <p><strong>Booking ID:</strong> ${formattedBookingId}</p>
-        <p><strong>Date:</strong> ${formattedDate}</p>
-        <p><strong>Time Slot:</strong> ${timeSlot}</p>
-        <p><strong>Consultation Type:</strong> ${type}</p>
-        <p><strong>Meeting Link:</strong> ${meetingLink || "N/A"}</p>
-        <p><strong>Paid Amount:</strong> ₹${consultationFee}</p>
-        <br>
-        <p>Thank you,<br>Team CredentHealth</p>
-      `,
-    };
+    // Email
+const mailOptions = {
+  from: `"Credent Health" <${process.env.EMAIL}>`,
+  to: staff.email,
+  subject: "Your Doctor Consultation is Confirmed",
+  html: `
+    <h2>Consultation Booking Confirmed</h2>
+    <p>Hello ${staff.name},</p>
+    <p>Your consultation with <strong>Dr. ${doctor.name}</strong> has been successfully booked.</p>
+    <p><strong>Booking ID:</strong> ${formattedBookingId}</p>
+    <p><strong>Date:</strong> ${formattedDate}</p>
+    <p><strong>Time Slot:</strong> ${timeSlot}</p>
+    <p><strong>Consultation Type:</strong> ${type}</p>
+    <p><strong>Meeting Link:</strong> ${meetingLink || "N/A"}</p>
+    <p><strong>Paid Amount:</strong> ₹${consultationFee}</p>
+    <p><strong>Staff Email:</strong> ${staff.email}</p>
+    <p><strong>Employee ID:</strong> ${staff.employeeId || "N/A"}</p>
+    <br>
+    <p>Thank you,<br>Team CredentHealth</p>
+  `,
+};
 
     try {
       await transporter.sendMail(mailOptions);
@@ -3923,29 +4708,33 @@ export const rescheduleDoctorConsultation = async (req, res) => {
       await staff.save();
 
       // Send email
-      const mailOptions = {
-        from: `"Credent Health" <${process.env.EMAIL}>`,
-        to: staff.email,
-        subject: "Your Doctor Consultation has been Rescheduled",
-        html: `
-          <h2>Consultation Rescheduled</h2>
-          <p>Hello ${staff.name},</p>
-          <p>Your consultation with <strong>Dr. ${doctor.name}</strong> has been rescheduled.</p>
-          <p><strong>Booking ID:</strong> ${booking.doctorConsultationBookingId}</p>
-          <p><strong>New Date:</strong> ${newDateStr}</p>
-          <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
-          <p><strong>Consultation Type:</strong> ${booking.type}</p>
-          <br>
-          <p>Thank you,<br>Team CredentHealth</p>
-        `
-      };
+     // Send email
+const mailOptions = {
+  from: `"Credent Health" <${process.env.EMAIL}>`,
+  to: staff.email,
+  subject: "Your Doctor Consultation has been Rescheduled",
+  html: `
+    <h2>Consultation Rescheduled</h2>
+    <p>Hello ${staff.name},</p>
+    <p>Your consultation with <strong>Dr. ${doctor.name}</strong> has been rescheduled.</p>
+    <p><strong>Booking ID:</strong> ${booking.doctorConsultationBookingId}</p>
+    <p><strong>New Date:</strong> ${newDateStr}</p>
+    <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
+    <p><strong>Consultation Type:</strong> ${booking.type}</p>
+    <p><strong>Staff Email:</strong> ${staff.email}</p>
+    <p><strong>Employee ID:</strong> ${staff.employeeId || "N/A"}</p>
+    <br>
+    <p>Thank you,<br>Team CredentHealth</p>
+  `
+};
 
-      try {
-        await transporter.sendMail(mailOptions);
-        console.log("✅ Reschedule email sent to:", staff.email);
-      } catch (err) {
-        console.error("❌ Email sending failed:", err);
-      }
+try {
+  await transporter.sendMail(mailOptions);
+  console.log("✅ Reschedule email sent to:", staff.email);
+} catch (err) {
+  console.error("❌ Email sending failed:", err);
+}
+
     }
 
     res.status(200).json({
@@ -4031,23 +4820,37 @@ export const submitHraAnswers = async (req, res) => {
     const { staffId, answers } = req.body;
 
     if (!staffId || !Array.isArray(answers) || answers.length === 0) {
-      return res.status(400).json({ message: "❗ Staff ID and answers are required." });
+      return res.status(400).json({
+        success: false,
+        message: "❗ Staff ID and answers are required."
+      });
     }
 
-    // Fetch all HRA categories once
+    // ✅ Fetch staff details for gender
+    const staff = await Staff.findById(staffId).lean();
+    if (!staff) {
+      return res.status(404).json({
+        success: false,
+        message: "❌ Staff not found."
+      });
+    }
+
+    const gender = staff.gender?.toLowerCase() || "male"; // default male
+
+    // ✅ Fetch all HRA categories once
     const hraCategories = await Hra.find();
 
-    // Map category name -> prescribed message
+    // Map: category name -> prescribed message
     const prescribedMap = {};
     hraCategories.forEach(cat => {
       prescribedMap[cat.hraName] = cat.prescribed || '';
     });
 
-    // Accumulate points per category
-    const categoryPoints = {};
-
     let totalPoints = 0;
+    const categoryPoints = {};
+    const formattedAnswers = [];
 
+    // ✅ Loop through each answer to calculate points
     for (const { questionId, selectedOption } of answers) {
       const question = await HraQuestion.findById(questionId);
       if (!question) continue;
@@ -4064,9 +4867,16 @@ export const submitHraAnswers = async (req, res) => {
         categoryPoints[categoryName] = 0;
       }
       categoryPoints[categoryName] += points;
+
+      formattedAnswers.push({
+        questionId,
+        selectedOption,
+        points,
+        hraCategoryName: categoryName
+      });
     }
 
-    // Determine overall risk level with new ranges
+    // ✅ Determine risk level & message
     let riskLevel = "Low";
     let riskMessage = "🎉 Congratulations! You are maintaining a healthy lifestyle. Keep it up!";
 
@@ -4078,17 +4888,19 @@ export const submitHraAnswers = async (req, res) => {
       riskMessage = "⚠️ Your score indicates a high heart risk. Please consult a health professional.";
     }
 
-    // Prepare prescribed messages for categories with score <= 5
+    // ✅ Find prescribed categories (<=5 points)
     const prescribedForCategories = {};
     for (const [category, points] of Object.entries(categoryPoints)) {
       if (points <= 5 && prescribedMap[category]) {
         prescribedForCategories[category] = prescribedMap[category];
-        break;  // Only first one added, then exit
+        break; // Only one category for now
       }
     }
 
-    return res.status(200).json({
-      message: `🎯 Hurrah! You scored ${totalPoints} points.`,
+    // ✅ Save submission to MongoDB
+    const hraSubmission = new HraSubmission({
+      staffId,
+      answers: formattedAnswers,
       totalPoints,
       riskLevel,
       riskMessage,
@@ -4096,9 +4908,31 @@ export const submitHraAnswers = async (req, res) => {
       prescribedForCategories
     });
 
+    await hraSubmission.save();
+
+    // ✅ Format totalPoints based on gender
+    const formattedTotalPoints =
+      gender === "female" ? `${totalPoints}/120` : `${totalPoints}/100`;
+
+    // ✅ Send response
+    return res.status(200).json({
+      success: true,
+      message: `🎯 Hurrah! You scored ${formattedTotalPoints}.`,
+      data: {
+        totalPoints: formattedTotalPoints,
+        riskLevel,
+        riskMessage,
+        categoryPoints,
+        prescribedForCategories,
+        submissionId: hraSubmission._id,
+        gender: gender
+      }
+    });
+
   } catch (error) {
     console.error("❌ Error submitting HRA answers:", error);
     return res.status(500).json({
+      success: false,
       message: "💥 Server error while processing answers.",
       error: error.message
     });
@@ -4690,7 +5524,7 @@ ${deleteLink}
 
 Reason: ${reason}
 
-If you have any questions or need further assistance, please contact us at contact.credenthealth@gmail.com.
+If you have any questions or need further assistance, please contact us at Support@credenthealth.com.
 
 Best regards,
 Your Team`
@@ -5022,3 +5856,143 @@ export const createSupportTicket = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
+
+
+
+// Submit an answer for a question
+// Submit an answer for a question
+export const submitQustionAnswer = async (req, res) => {
+  try {
+    const { userId, questionId, answer } = req.body;
+
+    // Validate that the user exists
+    const user = await Staff.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Validate that the question exists
+    const question = await SimpleQuestion.findById(questionId);
+    if (!question) {
+      return res.status(404).json({ message: 'Question not found' });
+    }
+
+    // Push the answer into the submittedAnswers array
+    question.submittedAnswers.push({
+      questionId,  // Store the questionId for the answer
+      userId,
+      answer,
+    });
+
+    // Save the updated question with the new answer
+    await question.save();
+
+    return res.status(201).json({
+      message: 'Answer submitted successfully',
+      data: question,  // Return the updated question with answers
+    });
+  } catch (error) {
+    console.error('Error submitting answer:', error);
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+
+
+export const staffForgotPassword = async (req, res) => {
+  try {
+    const { email, newPassword } = req.body;
+
+    if (!email || !newPassword) {
+      return res.status(400).json({ message: "Email and new password are required" });
+    }
+
+    // 🔍 Check staff
+    const staff = await Staff.findOne({ email });
+    if (!staff) {
+      return res.status(404).json({ message: "Staff not found" });
+    }
+
+    // ⚡ Update password directly
+    staff.password = newPassword;
+
+    // 💾 Save staff
+    await staff.save();
+
+    res.status(200).json({ message: "Password updated successfully" });
+
+  } catch (error) {
+    console.error("Error updating password:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
+
+export const changePasswordStaff = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: "Current and new password are required" });
+    }
+
+    // Find staff
+    const staff = await Staff.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ message: "Staff not found" });
+    }
+
+    // DIRECT compare (No bcrypt)
+    if (staff.password !== currentPassword) {
+      return res.status(400).json({ message: "Current password is incorrect" });
+    }
+
+    // DIRECT update (No hashing)
+    staff.password = newPassword;
+
+    await staff.save();
+
+    return res.status(200).json({
+      message: "Password updated successfully",
+    });
+
+  } catch (error) {
+    console.error("Error updating password:", error);
+    return res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
+
+export const resetStaffArrays = async (req, res) => {
+  try {
+    // 1️⃣ Update all staff documents to clear myScans, myTests, and myPackages arrays
+    const result = await Staff.updateMany(
+      {},
+      {
+        $set: {
+          myScans: [], // Reset the myScans array
+          myTests: [], // Reset the myTests array
+          myPackages: [] // Reset the myPackages array
+        }
+      }
+    );
+
+    // 2️⃣ Check if any documents were modified
+    if (result.modifiedCount > 0) {
+      return res.status(200).json({
+        message: "Successfully reset myScans, myTests, and myPackages for all staff members."
+      });
+    } else {
+      return res.status(404).json({ message: "No staff records were updated." });
+    }
+  } catch (error) {
+    console.error("❌ Error resetting staff arrays:", error);
+    return res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
+

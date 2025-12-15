@@ -11,6 +11,9 @@ const hraSchema = new mongoose.Schema({
   type: String,
   default: ''
 },
+gender: {
+    type: String,
+  },
 }, { timestamps: true });
 
 const Hra = mongoose.model('Hra', hraSchema);

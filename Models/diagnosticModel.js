@@ -25,6 +25,31 @@ const diagnosticSchema = new mongoose.Schema({
 
   network: { type: String, enum: ["Single", "Chain", 'Independent', 'Standalone'], default: "Single" },
 
+
+    // ✅ Branches array added to existing schema
+  branches: [
+    {
+      _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
+      branchName: { type: String, },
+      email: { type: String, },
+      phone: { type: String, },
+      address: { type: String, },
+      country: { type: String, },
+      state: { type: String, },
+      city: { type: String,  },
+      pincode: { type: String, },
+      contactPersons: [
+        {
+          name: { type: String, },
+          designation: { type: String,},
+          gender: { type: String, },
+          contactEmail: { type: String, },
+          contactNumber: { type: String,  }
+        }
+      ]
+    }
+  ],
+
   contactPersons: [
     {
       name: { type: String },

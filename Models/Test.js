@@ -7,6 +7,11 @@ const testSchema = new mongoose.Schema({
   price: {
     type: Number,
   },
+    gender: { // NEW: Added gender field
+    type: String,
+    enum: ['Male', 'Female', 'Both'],
+    default: 'Both'
+  },
   fastingRequired: {
     type: Boolean,
     default: false,
@@ -36,6 +41,10 @@ const testSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId, 
     ref: "Diagnostic" 
   },
+  diagnostics: [{ 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: "Diagnostic" 
+  }],
   category: {
     type: String,
     default: 'General',
