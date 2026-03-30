@@ -5843,7 +5843,7 @@ export const importStaffFromExcel = async (req, res) => {
 };
 export const getDashboardCounts = async (req, res) => {
   try {
-    // 1. Get counts in parallel
+    // 1. Get total counts in parallel
     const [
       companyCount,
       diagnosticCount,
@@ -5851,7 +5851,7 @@ export const getDashboardCounts = async (req, res) => {
       bookingCount,
       staffCount,
       doctorCount,
-      hraCount
+      hraUniqueStaffIds
     ] = await Promise.all([
       Company.countDocuments(),
       Diagnostic.countDocuments(),
@@ -5859,15 +5859,18 @@ export const getDashboardCounts = async (req, res) => {
       Booking.countDocuments({ type: "diagnostic" }),
       Staff.countDocuments(),
       Doctor.countDocuments(),
-      Hra.countDocuments()
+      HraSubmission.distinct("staffId") // Unique staff who submitted HRA
     ]);
 
-    // 2. Get chart data (last 5 months)
+    const hraCount = hraUniqueStaffIds.length;
+
+    // 2. Chart data for last 5 months
     const now = new Date();
     const fiveMonthsAgo = new Date();
     fiveMonthsAgo.setMonth(now.getMonth() - 4);
 
-    const pipeline = [
+    // Aggregate bookings for doctor & diagnostic
+    const bookingPipeline = [
       {
         $match: {
           createdAt: { $gte: fiveMonthsAgo },
@@ -5884,16 +5887,8 @@ export const getDashboardCounts = async (req, res) => {
       {
         $group: {
           _id: { month: "$month", year: "$year" },
-          doctor: {
-            $sum: {
-              $cond: [{ $eq: ["$type", "doctor"] }, 1, 0],
-            },
-          },
-          diagnostic: {
-            $sum: {
-              $cond: [{ $eq: ["$type", "diagnostic"] }, 1, 0],
-            },
-          },
+          doctor: { $sum: { $cond: [{ $eq: ["$type", "doctor"] }, 1, 0] } },
+          diagnostic: { $sum: { $cond: [{ $eq: ["$type", "diagnostic"] }, 1, 0] } },
         },
       },
       {
@@ -5901,20 +5896,64 @@ export const getDashboardCounts = async (req, res) => {
       },
     ];
 
-    const chartResults = await Booking.aggregate(pipeline);
+    const bookingChartResults = await Booking.aggregate(bookingPipeline);
 
-    const monthNames = [
-      "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    // Aggregate HRA submissions (unique staff per month)
+    const hraPipeline = [
+      {
+        $match: { submittedAt: { $gte: fiveMonthsAgo } },
+      },
+      {
+        $project: {
+          month: { $month: "$submittedAt" },
+          year: { $year: "$submittedAt" },
+          staffId: 1,
+        },
+      },
+      {
+        $group: {
+          _id: { month: "$month", year: "$year" },
+          uniqueStaff: { $addToSet: "$staffId" }, // ensures uniqueness
+        },
+      },
+      {
+        $project: {
+          month: "$_id.month",
+          year: "$_id.year",
+          hra: { $size: "$uniqueStaff" }, // count of unique staff
+        },
+      },
+      {
+        $sort: { year: 1, month: 1 },
+      },
     ];
 
-    const chartData = chartResults.map((entry) => ({
-      name: `${monthNames[entry._id.month]}`,
-      doctor: entry.doctor,
-      diagnostic: entry.diagnostic,
-    }));
+    const hraChartResults = await HraSubmission.aggregate(hraPipeline);
 
-    // 3. Return full dashboard data
+    // Merge booking and HRA data into chartData
+    const monthNames = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const chartData = [];
+
+    for (let i = 0; i < 5; i++) {
+      const d = new Date();
+      d.setMonth(now.getMonth() - 4 + i);
+      const month = d.getMonth() + 1;
+      const year = d.getFullYear();
+
+      const bookingEntry = bookingChartResults.find(
+        e => e._id?.month === month && e._id?.year === year
+      );
+      const hraEntry = hraChartResults.find(e => e.month === month && e.year === year);
+
+      chartData.push({
+        name: monthNames[month],
+        doctor: bookingEntry?.doctor || 0,
+        diagnostic: bookingEntry?.diagnostic || 0,
+        hra: hraEntry?.hra || 0,
+      });
+    }
+
+    // 3. Return dashboard data
     res.status(200).json({
       success: true,
       data: {

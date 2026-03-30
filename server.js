@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { Server } from 'socket.io';
 import mongoose from 'mongoose';
 import moment from 'moment';
+import dns from 'dns';
 
 // Database connection
 import connectDatabase from './db/connectDatabase.js';
@@ -31,6 +32,8 @@ dotenv.config();
 // Get __dirname in ES module
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+dns.setServers(['8.8.8.8', '8.8.4.4']);   // ✅ ADD THIS
 
 const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
 const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));

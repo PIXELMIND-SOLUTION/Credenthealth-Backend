@@ -1463,16 +1463,22 @@ export const getStaffTestPackageById = async (req, res) => {
   const { staffId } = req.params;
 
   try {
-    // 1️⃣ Get staff gender
+    // 1️⃣ Get staff gender + age
     const staff = await Staff.findById(staffId)
-      .select("gender")
+      .select("gender age")
       .lean();
-    if (!staff) {
-      return res.status(404).json({ success: false, message: "Staff member not found." });
-    }
-    const staffGender = staff.gender;
 
-    // 2️⃣ Fetch staff's packages/tests/scans with populates
+    if (!staff) {
+      return res.status(404).json({
+        success: false,
+        message: "Staff member not found."
+      });
+    }
+
+    const staffGender = staff.gender;
+    const staffAge = staff.age;
+
+    // 2️⃣ Fetch staff data
     const staffMember = await Staff.findById(staffId)
       .select("myPackages myTests myScans")
       .populate({
@@ -1505,33 +1511,78 @@ export const getStaffTestPackageById = async (req, res) => {
       .lean();
 
     if (!staffMember) {
-      return res.status(404).json({ success: false, message: "Staff data not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Staff data not found."
+      });
     }
 
-    // 3️⃣ Filter packages by gender rule
-    const allowedPackages = (staffMember.myPackages || []).filter(pkg => {
-      const fullPkg = pkg.packageId || {};
-      const pkgGender = fullPkg.gender;            // expect "Male" / "Female" / "Both"
-      if (!pkgGender) {
-        // agar package me gender defined nahi hai — skip kar do
-        return false;
+    // 🔥 Helper: extract age rules
+    const getAgeRangeFromName = (name) => {
+      if (!name) return null;
+
+      name = name.toLowerCase();
+
+      // ✅ Case 1: 46–60 or 46-60
+      let match = name.match(/(\d+)\s*[-–]\s*(\d+)/);
+      if (match) {
+        return {
+          min: parseInt(match[1]),
+          max: parseInt(match[2]),
+        };
       }
-      if (pkgGender === "Both") return true;
-      return pkgGender === staffGender;
+
+      // ✅ Case 2: less than 35
+      match = name.match(/less than\s*(\d+)/);
+      if (match) {
+        return {
+          min: 0,
+          max: parseInt(match[1]),
+        };
+      }
+
+      return null; // ❌ reject if no rule
+    };
+
+    // 3️⃣ Filter packages
+    let allowedPackages = (staffMember.myPackages || []).filter(pkg => {
+      const fullPkg = pkg.packageId || {};
+
+      // 🔹 Gender filter
+      const pkgGender = fullPkg.gender;
+      if (!pkgGender) return false;
+      if (pkgGender !== "Both" && pkgGender !== staffGender) return false;
+
+      // 🔹 Age filter
+      const ageRange = getAgeRangeFromName(fullPkg.name);
+      if (!ageRange) return false;
+
+      return staffAge >= ageRange.min && staffAge <= ageRange.max;
     });
 
+    // 🔥 4️⃣ REMOVE DUPLICATES (by packageId)
+    const uniqueMap = new Map();
+    allowedPackages.forEach(pkg => {
+      const key = pkg.packageId?._id?.toString();
+      if (key && !uniqueMap.has(key)) {
+        uniqueMap.set(key, pkg);
+      }
+    });
+
+    allowedPackages = Array.from(uniqueMap.values());
+
+    // ❌ No packages case
     if (allowedPackages.length === 0) {
-      // 🛑 Agar no package match hua — bhej custom message
       return res.status(200).json({
         success: true,
-        message: "No packages available for your gender.",
+        message: "No packages available for your gender and age.",
         myPackages: [],
         myTests: staffMember.myTests,
         myScans: staffMember.myScans
       });
     }
 
-    // 4️⃣ Expand allowed packages for response
+    // 5️⃣ Format response
     const expandedPackages = allowedPackages.map(pkg => {
       const diagnostic = pkg.diagnosticId || {};
       const fullPackage = pkg.packageId || {};
@@ -1542,7 +1593,7 @@ export const getStaffTestPackageById = async (req, res) => {
         packageName: fullPackage.name || "",
         price: fullPackage.price || 0,
         offerPrice: pkg.offerPrice || 0,
-        gender: fullPackage.gender,  // here we return the package's gender
+        gender: fullPackage.gender,
         doctorInfo: fullPackage.doctorInfo || "",
         totalTestsIncluded: fullPackage.totalTestsIncluded || 0,
         description: fullPackage.description || "",
@@ -1561,6 +1612,7 @@ export const getStaffTestPackageById = async (req, res) => {
       };
     });
 
+    // ✅ Final response
     res.status(200).json({
       success: true,
       message: "Staff packages, tests, and scans fetched successfully.",
@@ -1571,7 +1623,11 @@ export const getStaffTestPackageById = async (req, res) => {
 
   } catch (error) {
     console.error("Error fetching staff data:", error);
-    res.status(500).json({ success: false, message: "Server error while fetching staff data.", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching staff data.",
+      error: error.message
+    });
   }
 };
 
