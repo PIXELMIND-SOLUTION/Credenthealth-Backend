@@ -47,26 +47,38 @@ const __dirname = path.dirname(__filename);
 
 export const staffLogin = async (req, res) => {
   try {
-    const { email, password, acceptTermsAndConditions } = req.body;
+    const { email, contact_number, password, acceptTermsAndConditions } = req.body;
 
-    // 1️⃣ Find staff by email
-    const staff = await Staff.findOne({ email });
-
-    if (!staff) {
-      return res.status(400).json({ message: "Staff not found" });
+    // 1️⃣ Validation
+    if ((!email && !contact_number) || !password) {
+      return res.status(400).json({
+        message: "Email or Contact Number and Password are required"
+      });
     }
 
-    // 2️⃣ Check password
+    // 2️⃣ Find staff by email OR contact_number
+    const staff = await Staff.findOne({
+      $or: [
+        email ? { email } : null,
+        contact_number ? { contact_number } : null
+      ].filter(Boolean)
+    });
+
+    if (!staff) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    // 3️⃣ Direct password match (NO bcrypt)
     if (staff.password !== password) {
       return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    // 3️⃣ Check / update T&C
+    // 4️⃣ Check / update T&C
     if (!staff.termsAndConditionsAccepted) {
       if (!acceptTermsAndConditions) {
-        return res
-          .status(400)
-          .json({ message: "Terms and conditions must be accepted to login" });
+        return res.status(400).json({
+          message: "Terms and conditions must be accepted to login"
+        });
       }
 
       staff.termsAndConditionsAccepted = true;
@@ -74,69 +86,44 @@ export const staffLogin = async (req, res) => {
       await staff.save();
 
       console.log(
-        `✅ Staff (${staff.email}) accepted terms at: ${staff.termsAcceptedAt}`
+        `✅ Staff (${staff.email || staff.contact_number}) accepted terms at: ${staff.termsAcceptedAt}`
       );
     } else {
       console.log(
-        `ℹ️ Staff (${staff.email}) already accepted terms on ${staff.termsAcceptedAt}`
+        `ℹ️ Staff (${staff.email || staff.contact_number}) already accepted terms on ${staff.termsAcceptedAt}`
       );
     }
 
-    // 4️⃣ Generate login token
+    // 5️⃣ Generate login token
     const token = generateToken(staff._id);
 
-    // 5️⃣ Find which company this staff belongs to (search in company.staff array)
+    // 6️⃣ Find company
     let companyId = null;
     let companyName = null;
-    
-    // Search in all companies for this staff ID
-    const company = await Company.findOne({ 
-      "staff._id": staff._id 
+
+    const company = await Company.findOne({
+      "staff._id": staff._id
     });
 
     if (company) {
       companyId = company._id;
       companyName = company.companyName || company.name;
-      
-      console.log(`🏢 Company Found: ${companyName} (${companyId})`);
-      console.log(`👤 Updating staff inside company: ${staff.name}`);
 
-      // Update staff in company array
       const staffIndex = company.staff.findIndex(
         (s) => s._id.toString() === staff._id.toString()
       );
 
       if (staffIndex >= 0) {
-        company.staff[staffIndex].termsAndConditionsAccepted = staff.termsAndConditionsAccepted;
-        company.staff[staffIndex].termsAcceptedAt = staff.termsAcceptedAt;
-        
-        console.log(
-          `🔄 Updated company.staff entry for ${staff.name} -> T&C: ${staff.termsAndConditionsAccepted}`
-        );
-        
+        company.staff[staffIndex].termsAndConditionsAccepted =
+          staff.termsAndConditionsAccepted;
+        company.staff[staffIndex].termsAcceptedAt =
+          staff.termsAcceptedAt;
+
         await company.save();
-        console.log(`💾 Company (${companyName}) saved with updated staff terms.`);
-      }
-    } else {
-      console.log(`❌ No company found for staff: ${staff.name}`);
-      
-      // Optional: Try to find company by staff email domain or other method
-      const emailDomain = email.split('@')[1];
-      if (emailDomain) {
-        const companyByDomain = await Company.findOne({
-          $or: [
-            { companyEmail: { $regex: emailDomain, $options: 'i' } },
-            { email: { $regex: emailDomain, $options: 'i' } }
-          ]
-        });
-        
-        if (companyByDomain) {
-          console.log(`⚠️ Staff not in company.staff array, but found company by email domain: ${companyByDomain.companyName}`);
-        }
       }
     }
 
-    // 6️⃣ Prepare response
+    // 7️⃣ Response (UNCHANGED)
     const response = {
       message: "Login successful",
       token,
@@ -144,6 +131,7 @@ export const staffLogin = async (req, res) => {
         _id: staff._id,
         name: staff.name,
         email: staff.email,
+        contact_number: staff.contact_number,
         role: staff.role,
         gender: staff.gender,
         age: staff.age,
@@ -153,22 +141,24 @@ export const staffLogin = async (req, res) => {
         wallet_balance: staff.wallet_balance,
         termsAndConditionsAccepted: staff.termsAndConditionsAccepted,
         termsAcceptedAt: staff.termsAcceptedAt,
-        // Add companyId to staff object in response
         companyId: companyId || null
       },
-      // Also add company info at root level
-      companyInfo: companyId ? {
-        companyId,
-        companyName
-      } : null
+      companyInfo: companyId
+        ? {
+            companyId,
+            companyName
+          }
+        : null
     };
 
-    // 7️⃣ Send login response
-    res.status(200).json(response);
+    return res.status(200).json(response);
 
   } catch (error) {
     console.error("🔥 Error during staff login:", error);
-    res.status(500).json({ message: "Server error", error: error.message });
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message
+    });
   }
 };
 
@@ -2633,6 +2623,26 @@ export const createBookingFromStaffCart = async (req, res) => {
       });
     }
 
+    // Safe date formatting for comparison
+    const formattedDate = moment(date, [
+      "YYYY-MM-DD",
+      "DD/MM/YYYY",
+      "MM/DD/YYYY"
+    ]).isValid()
+      ? moment(date, [
+          "YYYY-MM-DD",
+          "DD/MM/YYYY",
+          "MM/DD/YYYY"
+        ]).format("YYYY-MM-DD")
+      : null;
+
+    if (!formattedDate) {
+      return res.status(400).json({
+        message: "Invalid date format",
+        isSuccessfull: false
+      });
+    }
+
     // Find staff
     const staff = await Staff.findById(staffId);
     if (!staff) {
@@ -2651,7 +2661,21 @@ export const createBookingFromStaffCart = async (req, res) => {
       });
     }
 
-    // Find diagnostic centre - IMPORTANT!
+    // ✅ CART ITEMS को बुकिंग के लिए सेव करें
+    const cartItems = staffCart.items.map(item => ({
+      itemId: item.itemId,
+      type: item.type,
+      title: item.title,
+      quantity: item.quantity,
+      price: item.price,
+      offerPrice: item.offerPrice,
+      totalPayable: item.totalPayable,
+      totalPrice: item.totalPrice
+    }));
+
+    console.log("✅ Cart items extracted for booking:", cartItems.length);
+
+    // Find diagnostic centre
     console.log("Fetching diagnostic with ID:", diagnosticId);
     const diagnostic = await Diagnostic.findById(diagnosticId);
     if (!diagnostic) {
@@ -2667,18 +2691,13 @@ export const createBookingFromStaffCart = async (req, res) => {
     console.log("- Name:", diagnostic.name);
     console.log("- Email:", diagnostic.email);
     console.log("- Phone:", diagnostic.phone);
-    console.log("- Address:", diagnostic.address);
-    console.log("- City:", diagnostic.city);
-    console.log("- State:", diagnostic.state);
 
-    // Calculate price
-    const totalPrice =
-      staffCart.totalPrice ??
-      staffCart.items.reduce(
-        (sum, item) => sum + (item.totalPrice || item.price || 0),
-        0
-      );
-    const payableAmount = staffCart.payableAmount ?? totalPrice;
+    // Calculate price from cart items
+    const totalPrice = staffCart.items.reduce(
+      (sum, item) => sum + (item.totalPrice || 0),
+      0
+    );
+    const payableAmount = staffCart.payableAmount || totalPrice;
 
     console.log("Price calculated - Total:", totalPrice, "Payable:", payableAmount);
 
@@ -2769,33 +2788,15 @@ export const createBookingFromStaffCart = async (req, res) => {
     const diagnosticBookingId = await generateDiagnosticBookingId();
     console.log("Generated Booking ID:", diagnosticBookingId);
 
-    // Safe date formatting
-    const bookingDate = moment(date, [
-      "YYYY-MM-DD",
-      "DD/MM/YYYY",
-      "MM/DD/YYYY"
-    ]).isValid()
-      ? moment(date, [
-          "YYYY-MM-DD",
-          "DD/MM/YYYY",
-          "MM/DD/YYYY"
-        ]).format("YYYY-MM-DD")
-      : null;
-
-    if (!bookingDate) {
-      return res.status(400).json({
-        message: "Invalid date format",
-        isSuccessfull: false
-      });
-    }
-
-    // Create booking
+    // ✅ Create booking WITH CART ITEMS
     const booking = new Booking({
       staffId,
       familyMemberId,
       diagnosticId,
+      // ✅ यहाँ cart items add करें
+      items: cartItems,
       serviceType,
-      date: bookingDate,
+      date: formattedDate, // Use the already formatted date
       timeSlot,
       cartId: staffCart._id,
       totalPrice,
@@ -2813,13 +2814,14 @@ export const createBookingFromStaffCart = async (req, res) => {
 
     const savedBooking = await booking.save();
     console.log("✅ Booking saved to DB with ID:", savedBooking._id);
+    console.log("✅ Items stored in booking:", savedBooking.items.length);
 
     // Mark diagnostic slot as booked
     let updated = false;
     const updateSlots = (slots) =>
       slots.map(slot => {
         if (
-          slot.date === bookingDate &&
+          slot.date === formattedDate &&
           slot.timeSlot === timeSlot &&
           !slot.isBooked
         ) {
@@ -2840,10 +2842,15 @@ export const createBookingFromStaffCart = async (req, res) => {
       console.log("✅ Diagnostic slots updated");
     }
 
+    // ✅ CART को CLEAR करें (Optional)
+    // staffCart.items = [];
+    // await staffCart.save();
+    // console.log("✅ Cart cleared after booking");
+
     // Notification
     staff.notifications.push({
       title: "Diagnostics Booking Confirmed",
-      message: `Your diagnostic booking for ${bookingDate} at ${timeSlot} has been confirmed.`,
+      message: `Your diagnostic booking for ${formattedDate} at ${timeSlot} has been confirmed.`,
       timestamp: new Date(),
       bookingId: savedBooking._id,
     });
@@ -2874,14 +2881,12 @@ export const createBookingFromStaffCart = async (req, res) => {
     // Get address based on service type
     let serviceAddress = "";
     if (serviceType === "Home Collection") {
-      // Home Collection के लिए staff address
       serviceAddress = `
         <p><strong>🏠 Home Collection Address:</strong></p>
         <p>${staff.address || "Address will be shared by the diagnostic center"}</p>
         <p><em>Our representative will visit this address for sample collection</em></p>
       `;
     } else {
-      // Center Visit के लिए diagnostic centre का address
       serviceAddress = `
         <p><strong>📍 Diagnostic Centre Address:</strong></p>
         <p><strong>Address:</strong> ${diagnostic.address || "Address not available"}</p>
@@ -2892,18 +2897,16 @@ export const createBookingFromStaffCart = async (req, res) => {
       `;
     }
 
-    // Debug email content
-    console.log("=== EMAIL CONTENT PREVIEW ===");
-    console.log("Diagnostic Name to include:", diagnostic.name);
-    console.log("Diagnostic Email to include:", diagnostic.email);
-    console.log("Diagnostic Phone to include:", diagnostic.phone);
-    console.log("Diagnostic Address to include:", diagnostic.address);
-    console.log("Contact Person Info:", contactPersonInfo ? "Yes" : "No");
-    console.log("Service Type:", serviceType);
-    console.log("Service Address Preview:", serviceAddress.substring(0, 100));
-    console.log("=== END PREVIEW ===");
+    // ✅ Email में items details भी add करें
+    const itemsListHtml = savedBooking.items.map(item => `
+      <tr>
+        <td style="padding: 8px; border: 1px solid #ddd;">${item.title}</td>
+        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${item.quantity}</td>
+        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₹${item.price}</td>
+        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₹${item.totalPrice}</td>
+      </tr>
+    `).join('');
 
-    // Build email HTML with ALL diagnostic details
     const emailHtml = `
       <!DOCTYPE html>
       <html>
@@ -2917,17 +2920,13 @@ export const createBookingFromStaffCart = async (req, res) => {
           .content { padding: 20px; background-color: #fff; }
           .section { background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid; }
           .booking-section { border-left-color: #3498db; }
+          .items-section { border-left-color: #1abc9c; }
           .diagnostic-section { border-left-color: #2ecc71; }
           .address-section { border-left-color: #9b59b6; }
-          .user-section { border-left-color: #e74c3c; }
-          .full-address-section { border-left-color: #f39c12; }
-          .notes-section { background-color: #e8f4f8; padding: 15px; border-left: 4px solid #3498db; margin: 20px 0; }
+          table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+          th { background-color: #f2f2f2; padding: 10px; text-align: left; border: 1px solid #ddd; }
+          td { padding: 8px; border: 1px solid #ddd; }
           .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 14px; }
-          h1, h2, h3 { color: #2c3e50; }
-          strong { color: #2c3e50; }
-          ul { margin: 10px 0; padding-left: 20px; }
-          li { margin-bottom: 5px; }
-          .contact-box { margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px; }
         </style>
       </head>
       <body>
@@ -2941,36 +2940,47 @@ export const createBookingFromStaffCart = async (req, res) => {
           
           <!-- Booking Summary -->
           <div class="section booking-section">
-            <h3 style="margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px;">📋 Booking Summary</h3>
+            <h3 style="margin-top: 0;">📋 Booking Summary</h3>
             <p><strong>Booking ID:</strong> ${diagnosticBookingId}</p>
-            <p><strong>Booking Date:</strong> ${moment(bookingDate).format('DD MMM YYYY')}</p>
+            <p><strong>Booking Date:</strong> ${moment(formattedDate).format('DD MMM YYYY')}</p>
             <p><strong>Time Slot:</strong> ${timeSlot}</p>
             <p><strong>Service Type:</strong> ${serviceType}</p>
             <p><strong>Total Amount:</strong> ₹${totalPrice}</p>
             ${staffCart.discount ? `<p><strong>Discount Applied:</strong> ₹${staffCart.discount}</p>` : ''}
             <p><strong>Paid Amount:</strong> ₹${payableAmount}</p>
-            <p><strong>Payment Mode:</strong> ${walletUsed > 0 ? 'Wallet' + (onlinePaymentUsed > 0 ? ' + Online' : '') : 'Online Payment'}</p>
-            ${walletUsed > 0 ? `<p><strong>Wallet Used:</strong> ₹${walletUsed}</p>` : ''}
-            ${onlinePaymentUsed > 0 ? `<p><strong>Online Payment:</strong> ₹${onlinePaymentUsed}</p>` : ''}
           </div>
           
-          <!-- Diagnostic Centre Details - यहाँ diagnostic का सारा data है -->
+          <!-- Items Details -->
+          <div class="section items-section">
+            <h3 style="margin-top: 0;">🛒 Items Booked</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Item Name</th>
+                  <th>Quantity</th>
+                  <th>Price</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${itemsListHtml}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="3" style="text-align: right; font-weight: bold;">Grand Total:</td>
+                  <td style="font-weight: bold;">₹${totalPrice}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          
+          <!-- Diagnostic Centre Details -->
           <div class="section diagnostic-section">
-            <h3 style="margin-top: 0; border-bottom: 2px solid #2ecc71; padding-bottom: 10px;">🏥 Diagnostic Centre Details</h3>
+            <h3 style="margin-top: 0;">🏥 Diagnostic Centre Details</h3>
             <p><strong>Centre Name:</strong> ${diagnostic.name || "Neuberg Anand"}</p>
             <p><strong>Centre Email:</strong> ${diagnostic.email || "credenthealth@gmail.com"}</p>
             <p><strong>Centre Phone:</strong> ${diagnostic.phone || "7619196856"}</p>
-            
             ${contactPersonInfo}
-          </div>
-          
-          
-          <!-- Diagnostic Centre -->
-          <div class="section full-address-section">
-            <h3 style="margin-top: 0; border-bottom: 2px solid #f39c12; padding-bottom: 10px;">🏢 Diagnostic Centre Address</h3>
-            <p><strong>Address:</strong><br>${diagnostic.address || "Anand Tower, 54, Bowring Hospital Rd, Tasker Town, Shivaji Nagar, Bengaluru, Karnataka 560001"}</p>
-            <p><strong>Location:</strong> ${diagnostic.city || "Bengaluru"}, ${diagnostic.state || "Karnataka"} - ${diagnostic.pincode || "560001"}</p>
-            <p><strong>Country:</strong> ${diagnostic.country || "India"}</p>
           </div>
           
           <div class="footer">
@@ -2983,16 +2993,6 @@ export const createBookingFromStaffCart = async (req, res) => {
       </html>
     `;
 
-    // Final debug check
-    console.log("=== FINAL EMAIL VERIFICATION ===");
-    console.log("Email recipient:", staff.email);
-    console.log("Contains 'Neuberg Anand':", emailHtml.includes("Neuberg Anand"));
-    console.log("Contains diagnostic email:", emailHtml.includes(diagnostic.email || "credenthealth@gmail.com"));
-    console.log("Contains diagnostic phone:", emailHtml.includes(diagnostic.phone || "7619196856"));
-    console.log("Contains diagnostic address:", emailHtml.includes(diagnostic.address || "Anand Tower"));
-    console.log("Email HTML length:", emailHtml.length, "characters");
-    console.log("=== END VERIFICATION ===");
-
     // Email
     const mailOptions = {
       from: `"Credent Health" <${process.env.EMAIL}>`,
@@ -3004,13 +3004,12 @@ export const createBookingFromStaffCart = async (req, res) => {
     try {
       await transporter.sendMail(mailOptions);
       console.log("✅ EMAIL SENT SUCCESSFULLY to:", staff.email);
-      console.log("✅ Diagnostic details WERE INCLUDED in the email");
     } catch (err) {
       console.error("❌ Email sending failed:", err);
     }
 
     return res.status(201).json({
-      message: "Booking created successfully.",
+      message: "Booking created successfully with items stored.",
       isSuccessfull: true,
       diagnosticBookingId,
       walletUsed,
@@ -3018,9 +3017,7 @@ export const createBookingFromStaffCart = async (req, res) => {
       walletBalance: staff.wallet_balance,
       forTestsBalance: staff.forTests,
       booking: savedBooking,
-      diagnosticIncluded: true, // Confirm diagnostic was included
-      diagnosticName: diagnostic.name,
-      diagnosticEmail: diagnostic.email
+      itemsCount: savedBooking.items.length
     });
 
   } catch (err) {
@@ -3033,8 +3030,6 @@ export const createBookingFromStaffCart = async (req, res) => {
     });
   }
 };
-
-
 export const rescheduleDiagnosticBooking = async (req, res) => {
   try {
     const { staffId, bookingId } = req.params;
@@ -3197,7 +3192,8 @@ export const myBookings = async (req, res) => {
       .populate("doctorId", "name email image specialization qualification address")
       .lean();
 
-    bookings.sort((a, b) => new Date(b.date) - new Date(a.date));
+    // ✅ FIX 1: Sorting by creation date (newest first)
+    bookings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     // Store notifications that need to be saved
     const notificationsToAdd = [];
@@ -3270,8 +3266,38 @@ export const myBookings = async (req, res) => {
             member._id.toString() === booking.familyMemberId?.toString()
         );
 
-        const populatedItems = booking.cartId?.items?.length
-          ? await Promise.all(
+        // ✅ FIX 2: अब booking.items से items लें (cart.items से नहीं)
+        let populatedItems = [];
+
+        // पहले booking.items check करें (नया approach)
+        if (booking.items && booking.items.length > 0) {
+          populatedItems = await Promise.all(
+            booking.items.map(async (item) => {
+              let details = null;
+              if (item.type === "xray") {
+                details = await Xray.findById(item.itemId).lean();
+              } else if (item.type === "test") {
+                details = await Test.findById(item.itemId).lean();
+              }
+              return { 
+                ...item, 
+                itemDetails: details || null,
+                // Ensure all fields are included
+                _id: item._id || item.itemId,
+                type: item.type,
+                title: item.title,
+                quantity: item.quantity,
+                price: item.price,
+                offerPrice: item.offerPrice,
+                totalPayable: item.totalPayable,
+                totalPrice: item.totalPrice
+              };
+            })
+          );
+        }
+        // Fallback: अगर booking.items नहीं है तो cart.items check करें
+        else if (booking.cartId?.items?.length) {
+          populatedItems = await Promise.all(
             booking.cartId.items.map(async (item) => {
               let details = null;
               if (item.type === "xray") {
@@ -3281,10 +3307,30 @@ export const myBookings = async (req, res) => {
               }
               return { ...item, itemDetails: details || null };
             })
-          )
-          : [];
+          );
+        }
+
+        // Format booking date for display
+        const displayDate = booking.createdAt 
+          ? new Date(booking.createdAt).toLocaleDateString('en-IN', {
+              day: 'numeric',
+              month: 'short',
+              year: 'numeric'
+            })
+          : '';
+
+        const displayTime = booking.createdAt
+          ? new Date(booking.createdAt).toLocaleTimeString('en-IN', {
+              hour: '2-digit',
+              minute: '2-digit'
+            })
+          : '';
 
         return {
+          // ✅ नया field: booking creation timestamp
+          createdAt: booking.createdAt,
+          createdAtDisplay: `${displayDate} at ${displayTime}`,
+          
           bookingId: booking._id,
           serviceType: booking.serviceType || "",
           type: booking.type || "",
@@ -3349,7 +3395,13 @@ export const myBookings = async (req, res) => {
             // Branch intentionally excluded as per requirement
           },
 
+          // ✅ FIX 3: अब यह booking.items show करेगा
           cartItems: populatedItems,
+          
+          // Debug info
+          itemsSource: booking.items ? "booking.items" : "cart.items",
+          itemsCount: populatedItems.length,
+          
           reportFile: booking.report_file || null,
           diagPrescription: booking.diagPrescription || null,
           doctorReports: booking.doctorReports || [],
@@ -3376,14 +3428,15 @@ export const myBookings = async (req, res) => {
     res.status(200).json({
       success: true,
       bookings: populatedBookings,
+      // Debug info
+      totalBookings: populatedBookings.length,
+      sortedBy: "createdAt (newest first)"
     });
   } catch (err) {
     console.error("❌ Error fetching bookings:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
-
-
 
 
 export const getStaffNotifications = async (req, res) => {
@@ -3593,6 +3646,26 @@ export const createPackageBooking = async (req, res) => {
       });
     }
 
+    // Safe date formatting for comparison
+    const bookingDate = moment(date, [
+      "YYYY-MM-DD",
+      "DD/MM/YYYY",
+      "MM/DD/YYYY"
+    ]).isValid()
+      ? moment(date, [
+          "YYYY-MM-DD",
+          "DD/MM/YYYY",
+          "MM/DD/YYYY"
+        ]).format("YYYY-MM-DD")
+      : null;
+
+    if (!bookingDate) {
+      return res.status(400).json({
+        message: "Invalid date format",
+        isSuccessfull: false
+      });
+    }
+
     // Fetch staff, package, and diagnostic
     const staff = await Staff.findById(staffId);
     if (!staff) return res.status(404).json({ 
@@ -3606,7 +3679,7 @@ export const createPackageBooking = async (req, res) => {
       isSuccessfull: false 
     });
 
-    // ✅ Fetch diagnostic centre details
+    // Fetch diagnostic centre details
     const diagnostic = await Diagnostic.findById(diagnosticId);
     if (!diagnostic) return res.status(404).json({ 
       message: "Diagnostic centre not found", 
@@ -3706,26 +3779,6 @@ export const createPackageBooking = async (req, res) => {
       });
     }
     await staff.save();
-
-    // Date formatting
-    const bookingDate = moment(date, [
-      "YYYY-MM-DD",
-      "DD/MM/YYYY",
-      "MM/DD/YYYY"
-    ]).isValid()
-      ? moment(date, [
-          "YYYY-MM-DD",
-          "DD/MM/YYYY",
-          "MM/DD/YYYY"
-        ]).format("YYYY-MM-DD")
-      : null;
-
-    if (!bookingDate) {
-      return res.status(400).json({
-        message: "Invalid date format",
-        isSuccessfull: false
-      });
-    }
 
     // Generate unique booking IDs
     const packageBookingId = await generatePackageBookingId();
@@ -3934,7 +3987,6 @@ export const createPackageBooking = async (req, res) => {
     });
   }
 };
-
 
 export const reschedulePackageBooking = async (req, res) => {
   try {
@@ -5318,7 +5370,7 @@ export const getSlotsByDiagnosticId = async (req, res) => {
     // IST current time
     const now = moment.tz("Asia/Kolkata");
 
-    // Function to process slots and filter out expired or booked ones
+    // Function to process slots and filter out expired, booked, or post-6PM slots
     const processSlots = (slotsArray) => {
       return (slotsArray || [])
         .filter(slot => slot.date === formattedDate)
@@ -5331,6 +5383,15 @@ export const getSlotsByDiagnosticId = async (req, res) => {
           return slotDateTime.isValid() && slotDateTime.isSameOrAfter(now);
         })
         .filter(slot => !slot.isBooked)  // <-- exclude booked slots here
+        .filter(slot => {
+          // Include slots until 18:00 (6 PM)
+          const slotDateTime = moment.tz(
+            `${slot.date} ${slot.timeSlot}`,
+            ['YYYY-MM-DD HH:mm', 'YYYY-MM-DD H:mm', 'YYYY-MM-DD h:mm A'],
+            "Asia/Kolkata"
+          );
+          return slotDateTime.hours() < 18 || (slotDateTime.hours() === 18 && slotDateTime.minutes() === 0); // Include up to 18:00
+        })
         .map(slotDoc => {
           const slot = slotDoc.toObject ? slotDoc.toObject() : slotDoc; // mongoose doc to plain object
           return {

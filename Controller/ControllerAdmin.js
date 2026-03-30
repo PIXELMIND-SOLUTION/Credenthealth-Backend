@@ -8750,10 +8750,118 @@ export const addDiagnosticMultipleSlots = async (req, res) => {
 export const updateDiagnosticSlot = async (req, res) => {
   try {
     const { diagnosticId } = req.params;
-    const { slotType, slotId, newSlot } = req.body;
+    const { slotType, slotId, newSlot, bulkOperation, bulkData } = req.body;
     const { newDay, newDate, newTimeSlot, isBooked } = newSlot || {};
 
-    // Validation को modify करें
+    // ==================== BULK REPLACE SLOTS ====================
+    if (bulkOperation === 'replace') {
+      const { startDate, endDate, startTime, endTime, timeGap } = bulkData || {};
+
+      // Validation for bulk replace
+      if (!diagnosticId || !slotType || !startDate || !endDate || !startTime || !endTime || !timeGap) {
+        return res.status(400).json({
+          message: "For bulk replace: diagnosticId, slotType, startDate, endDate, startTime, endTime, timeGap are required."
+        });
+      }
+
+      // Find diagnostic
+      const diagnostic = await Diagnostic.findById(diagnosticId);
+      if (!diagnostic) {
+        return res.status(404).json({ message: "Diagnostic center not found." });
+      }
+
+      const field = slotType === 'home' ? 'homeCollectionSlots' : 'centerVisitSlots';
+      
+      // Generate time slots based on gap
+      const generateTimeSlots = () => {
+        const slots = [];
+        const [startHour, startMinute] = startTime.split(':').map(Number);
+        const [endHour, endMinute] = endTime.split(':').map(Number);
+        
+        let currentHour = startHour;
+        let currentMinute = startMinute;
+        
+        while (currentHour < endHour || (currentHour === endHour && currentMinute <= endMinute)) {
+          const timeStr = `${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')}`;
+          slots.push(timeStr);
+          
+          currentMinute += parseInt(timeGap);
+          if (currentMinute >= 60) {
+            currentHour += Math.floor(currentMinute / 60);
+            currentMinute = currentMinute % 60;
+          }
+        }
+        
+        return slots;
+      };
+
+      const newTimeSlots = generateTimeSlots();
+      
+      if (newTimeSlots.length === 0) {
+        return res.status(400).json({
+          message: "No time slots generated. Please check start and end time."
+        });
+      }
+
+      // Get all dates in range
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      const dateRange = [];
+      let currentDate = new Date(start);
+      
+      while (currentDate <= end) {
+        const dateStr = currentDate.toISOString().split('T')[0];
+        const dayOfWeek = currentDate.toLocaleDateString('en-US', { weekday: 'long' });
+        dateRange.push({ date: dateStr, day: dayOfWeek });
+        currentDate.setDate(currentDate.getDate() + 1);
+      }
+
+      // Keep only slots outside date range
+      const existingSlots = diagnostic[field] || [];
+      const slotsToKeep = existingSlots.filter(slot => {
+        const slotDate = new Date(slot.date);
+        return slotDate < start || slotDate > end;
+      });
+
+      // Create new slots for date range
+      const newSlots = [];
+      dateRange.forEach(({ date, day }) => {
+        newTimeSlots.forEach(timeSlot => {
+          newSlots.push({
+            day: day,
+            date: date,
+            timeSlot: timeSlot,
+            type: slotType === 'home' ? 'Home Collection' : 'Center Visit',
+            isBooked: false
+          });
+        });
+      });
+
+      // Update diagnostic with new slots
+      diagnostic[field] = [...slotsToKeep, ...newSlots];
+      diagnostic.markModified(field);
+      
+      await diagnostic.save();
+
+      return res.status(200).json({
+        message: "Bulk slots replaced successfully.",
+        summary: {
+          dateRange: `${startDate} to ${endDate}`,
+          timeRange: `${startTime} to ${endTime}`,
+          timeGap: `${timeGap} minutes`,
+          datesUpdated: dateRange.length,
+          slotsRemoved: existingSlots.length - slotsToKeep.length,
+          slotsAdded: newSlots.length,
+          totalSlotsNow: diagnostic[field].length,
+          newTimePattern: newTimeSlots
+        },
+        diagnostic
+      });
+    }
+
+    // ==================== SINGLE SLOT UPDATE ====================
+    
+    // Validation for single slot update
     if (!diagnosticId || !slotType || !slotId || !newSlot) {
       return res.status(400).json({
         message: "diagnosticId, slotType, slotId, and newSlot are required."
@@ -8767,81 +8875,209 @@ export const updateDiagnosticSlot = async (req, res) => {
       });
     }
 
-    const diagnostic = await Diagnostic.findById(diagnosticId);
-    if (!diagnostic) {
-      return res.status(404).json({ message: "Diagnostic center not found." });
-    }
-
+    // Use Mongoose's atomic operation to avoid version error
     const field = slotType === 'home' ? 'homeCollectionSlots' : 'centerVisitSlots';
     
-    // slotId के basis पर search करें
-    const slotFound = diagnostic[field].find(s => s._id.toString() === slotId);
-    
-    if (!slotFound) {
-      return res.status(404).json({ message: "Slot not found with provided slotId." });
-    }
-
-    // Update slot using slotId
-    const updatedSlots = diagnostic[field].map(s => {
-      if (s._id.toString() === slotId) {
-        return { 
-          ...s._doc, // यह important है
-          day: newDay, 
-          date: newDate, 
-          timeSlot: newTimeSlot, 
-          isBooked: isBooked ?? s.isBooked 
-        };
-      }
-      return s;
+    // First check if diagnostic exists and slot exists
+    const diagnostic = await Diagnostic.findOne({
+      _id: diagnosticId,
+      [`${field}._id`]: slotId
     });
 
-    diagnostic[field] = updatedSlots;
-    await diagnostic.save();
+    if (!diagnostic) {
+      return res.status(404).json({ 
+        message: "Diagnostic center not found or slot not found." 
+      });
+    }
+
+    // Update using atomic operation
+    const updatedDiagnostic = await Diagnostic.findOneAndUpdate(
+      { 
+        _id: diagnosticId,
+        [`${field}._id`]: slotId 
+      },
+      {
+        $set: {
+          [`${field}.$.day`]: newDay,
+          [`${field}.$.date`]: newDate,
+          [`${field}.$.timeSlot`]: newTimeSlot,
+          [`${field}.$.isBooked`]: isBooked !== undefined ? isBooked : false
+        }
+      },
+      { 
+        new: true,
+        runValidators: true 
+      }
+    );
+
+    if (!updatedDiagnostic) {
+      return res.status(400).json({
+        message: "Failed to update slot. Please try again."
+      });
+    }
 
     return res.status(200).json({
       message: "Slot updated successfully.",
-      diagnostic
+      diagnostic: updatedDiagnostic
     });
+
   } catch (error) {
     console.error("❌ Error updating diagnostic slot:", error);
-    return res.status(500).json({ message: "Server error", error: error.message });
+    
+    // Handle specific errors
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        message: "Validation error",
+        errors: Object.values(error.errors).map(err => err.message)
+      });
+    }
+    
+    if (error.name === 'VersionError') {
+      // Try alternative approach
+      try {
+        const { diagnosticId, slotType, slotId, newSlot, bulkOperation, bulkData } = req.body;
+        
+        // Handle bulk operation retry
+        if (bulkOperation === 'replace') {
+          const { startDate, endDate, startTime, endTime, timeGap } = bulkData || {};
+          const field = slotType === 'home' ? 'homeCollectionSlots' : 'centerVisitSlots';
+          
+          const diagnostic = await Diagnostic.findById(diagnosticId);
+          if (!diagnostic) {
+            return res.status(404).json({ message: "Diagnostic center not found." });
+          }
+          
+          // Simply try to save again
+          await diagnostic.save();
+          
+          const updatedDiagnostic = await Diagnostic.findById(diagnosticId);
+          return res.status(200).json({
+            message: "Bulk slots replaced successfully (after retry).",
+            diagnostic: updatedDiagnostic
+          });
+        }
+        
+        // Handle single slot retry
+        const { newDay, newDate, newTimeSlot, isBooked } = newSlot || {};
+        const field = slotType === 'home' ? 'homeCollectionSlots' : 'centerVisitSlots';
+        
+        // Use updateOne directly
+        const result = await Diagnostic.updateOne(
+          { 
+            _id: diagnosticId,
+            [`${field}._id`]: slotId 
+          },
+          {
+            $set: {
+              [`${field}.$.day`]: newDay,
+              [`${field}.$.date`]: newDate,
+              [`${field}.$.timeSlot`]: newTimeSlot,
+              [`${field}.$.isBooked`]: isBooked !== undefined ? isBooked : false
+            }
+          }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(400).json({
+            message: "Failed to update slot after retry."
+          });
+        }
+
+        // Fetch updated diagnostic
+        const updatedDiagnostic = await Diagnostic.findById(diagnosticId);
+        
+        return res.status(200).json({
+          message: "Slot updated successfully (after retry).",
+          diagnostic: updatedDiagnostic
+        });
+      } catch (retryError) {
+        return res.status(500).json({
+          message: "Failed after retry",
+          error: retryError.message
+        });
+      }
+    }
+    
+    return res.status(500).json({ 
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
-
 
 export const deleteDiagnosticSlot = async (req, res) => {
   try {
     const { diagnosticId } = req.params;
     const { slotType, day, date, timeSlot } = req.body;
 
-
-
-    const diagnostic = await Diagnostic.findById(diagnosticId);
-    if (!diagnostic) {
-      return res.status(404).json({ message: "Diagnostic center not found." });
+    // Validate input
+    if (!slotType || !day || !date || !timeSlot) {
+      return res.status(400).json({ 
+        message: "Missing required fields." 
+      });
     }
 
-    // ✅ Use correct field name
+    if (!['home', 'center'].includes(slotType)) {
+      return res.status(400).json({ 
+        message: "Invalid slotType." 
+      });
+    }
+
     const field = slotType === 'home' ? 'homeCollectionSlots' : 'centerVisitSlots';
-
-    const originalLen = diagnostic[field].length;
-
-    // ✅ Match based on day, date, and timeSlot
-    diagnostic[field] = diagnostic[field].filter(
-      s => !(s.day === day && s.date === date && s.timeSlot === timeSlot)
+    
+    // Use findOneAndUpdate to handle the operation atomically
+    const result = await Diagnostic.findOneAndUpdate(
+      { 
+        _id: diagnosticId,
+        [field]: { 
+          $elemMatch: { 
+            day: day, 
+            date: date, 
+            timeSlot: timeSlot 
+          } 
+        }
+      },
+      {
+        $pull: {
+          [field]: { 
+            day: day, 
+            date: date, 
+            timeSlot: timeSlot 
+          }
+        }
+      },
+      {
+        new: true, // Return the updated document
+        runValidators: true
+      }
     );
 
-    if (diagnostic[field].length === originalLen) {
-      return res.status(404).json({ message: "No matching slot found to delete." });
+    if (!result) {
+      return res.status(404).json({ 
+        message: "Diagnostic center not found or no matching slot exists.",
+        diagnosticId,
+        slotDetails: { day, date, timeSlot }
+      });
     }
 
-    await diagnostic.save();
-
-    return res.status(200).json({ message: "Slot deleted successfully.", diagnostic });
+    return res.status(200).json({
+      message: "Slot deleted successfully.",
+      diagnostic: result
+    });
 
   } catch (error) {
     console.error("❌ Error deleting diagnostic slot:", error);
-    return res.status(500).json({ message: "Server error", error: error.message });
+    
+    if (error.name === 'CastError') {
+      return res.status(400).json({ 
+        message: "Invalid ID format." 
+      });
+    }
+    
+    return res.status(500).json({ 
+      message: "Server error",
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 };
 

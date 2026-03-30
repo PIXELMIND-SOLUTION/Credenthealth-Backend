@@ -43,6 +43,17 @@ const bookingSchema = new mongoose.Schema({
     }
   ],
 
+   items: [{
+    itemId: { type: mongoose.Schema.Types.ObjectId },
+    type: { type: String, enum: ['test', 'xray'] },
+    title: String,
+    quantity: { type: Number, default: 1, min: 1 },
+    price: Number,
+    offerPrice: Number,
+    totalPayable: Number,  // price - offer
+    totalPrice: Number     // totalPayable * quantity
+  }],
+
    // Staff uploaded files
   receivedDiagReports: { type: [String], default: [] },        // Staff uploaded diagnostic reports
   receivedDiagPrescriptions: { type: [String], default: [] },  // Staff uploaded prescriptions
