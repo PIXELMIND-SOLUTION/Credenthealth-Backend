@@ -39,7 +39,8 @@ import admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import csvParser from "csv-parser";
 import Cart from '../Models/Cart.js';
-
+import multer from "multer";
+import JSZip from "jszip";
 
 
 
@@ -12630,4 +12631,204 @@ export const getAllCompanyDiagnosticsByStaffPackages = async (req, res) => {
       error: error.message
     });
   }
+};
+
+
+// Temporary storage for uploaded ZIP
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = "uploads/temp";
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + "-" + file.originalname);
+  },
+});
+const uploadZip = multer({ storage }).single("zipFile");
+
+// Helper: get display booking ID (same logic as frontend)
+const getDisplayBookingId = (booking) => {
+  if (booking.diagnosticBookingId) return booking.diagnosticBookingId;
+  if (booking.packageId) return `PKG${booking.packageId.slice(-2)}`;
+  return null;
+};
+
+export const bulkUploadDiagnostic = async (req, res) => {
+  uploadZip(req, res, async (err) => {
+    if (err) {
+      console.error("Multer error:", err);
+      return res.status(400).json({ success: false, message: "ZIP upload failed", error: err.message });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "No ZIP file uploaded" });
+    }
+
+    const uploadType = req.query.type; // "report" or "prescription"
+    if (!uploadType || !["report", "prescription"].includes(uploadType)) {
+      return res.status(400).json({ success: false, message: "Invalid type. Use ?type=report or ?type=prescription" });
+    }
+
+    const zipPath = req.file.path;
+    const extractDir = `uploads/temp/extracted_${Date.now()}`;
+
+    try {
+      if (!fs.existsSync(extractDir)) fs.mkdirSync(extractDir, { recursive: true });
+
+      const zipData = fs.readFileSync(zipPath);
+      const zip = await JSZip.loadAsync(zipData);
+      const files = Object.values(zip.files).filter(f => !f.dir);
+
+      const results = { total: files.length, success: 0, failed: [] };
+
+      // Fetch all bookings once for matching
+      const allBookings = await Booking.find({});
+      const bookingMap = new Map();
+      allBookings.forEach(booking => {
+        const displayId = getDisplayBookingId(booking);
+        if (displayId) bookingMap.set(displayId, booking);
+      });
+
+      for (const file of files) {
+        const fileName = file.name;
+        const baseName = path.parse(fileName).name; // e.g., "DIA12345" or "PKG9876"
+        const booking = bookingMap.get(baseName);
+
+        if (!booking) {
+          results.failed.push({ file: fileName, reason: "No matching booking ID" });
+          continue;
+        }
+
+        const fileBuffer = await file.async("nodebuffer");
+        const uniqueName = Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(fileName);
+        const savePath = path.join("uploads/diagnosticReport", uniqueName); // reuse same folder
+        fs.writeFileSync(savePath, fileBuffer);
+
+        const updateField = uploadType === "report" ? "report_file" : "diagPrescription";
+        await Booking.findByIdAndUpdate(booking._id, { [updateField]: `/uploads/diagnosticReport/${uniqueName}` });
+
+        results.success++;
+      }
+
+      // Cleanup
+      fs.unlinkSync(zipPath);
+      fs.rmSync(extractDir, { recursive: true, force: true });
+
+      return res.status(200).json({ success: true, message: "Bulk upload completed", results });
+    } catch (error) {
+      console.error("Bulk upload error:", error);
+      if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+      if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
+      return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    }
+  });
+};
+
+
+
+// Temporary storage for ZIP file (doctor specific)
+const doctorStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = "uploads/temp_doctor";
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, "doctor_" + Date.now() + "-" + file.originalname);
+  },
+});
+const uploadDoctorZip = multer({ storage: doctorStorage }).single("zipFile");
+
+// Helper: get display booking ID for doctor appointments
+const getDoctorDisplayBookingId = (appointment) => {
+  if (appointment.doctorConsultationBookingId) return appointment.doctorConsultationBookingId;
+  return appointment.appointmentId?.toString() || null;
+};
+
+export const bulkUploadDoctor = async (req, res) => {
+  uploadDoctorZip(req, res, async (err) => {
+    if (err) {
+      console.error("Multer error (doctor bulk):", err);
+      return res.status(400).json({ success: false, message: "ZIP upload failed", error: err.message });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "No ZIP file uploaded" });
+    }
+
+    const uploadType = req.query.type; // "report" or "prescription"
+    if (!uploadType || !["report", "prescription"].includes(uploadType)) {
+      return res.status(400).json({ success: false, message: "Invalid type. Use ?type=report or ?type=prescription" });
+    }
+
+    const zipPath = req.file.path;
+    const extractDir = `uploads/temp_doctor_extracted_${Date.now()}`;
+
+    try {
+      if (!fs.existsSync(extractDir)) fs.mkdirSync(extractDir, { recursive: true });
+
+      const zipData = fs.readFileSync(zipPath);
+      const zip = await JSZip.loadAsync(zipData);
+      const files = Object.values(zip.files).filter(f => !f.dir);
+
+      const results = { total: files.length, success: 0, failed: [] };
+
+      // Fetch all appointments once
+      const allAppointments = await Booking.find({});
+      const appointmentMap = new Map();
+      allAppointments.forEach(appt => {
+        const displayId = getDoctorDisplayBookingId(appt);
+        if (displayId) appointmentMap.set(displayId, appt);
+      });
+
+      for (const file of files) {
+        const fileName = file.name;
+        const baseName = path.parse(fileName).name; // e.g., "DOC12345"
+        const appointment = appointmentMap.get(baseName);
+
+        if (!appointment) {
+          results.failed.push({ file: fileName, reason: "No matching appointment ID" });
+          continue;
+        }
+
+        const fileBuffer = await file.async("nodebuffer");
+        const uniqueName = Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(fileName);
+        let savePath, fieldName;
+
+        if (uploadType === "report") {
+          savePath = path.join("uploads/reports", uniqueName);
+          fieldName = "doctorReports";
+        } else {
+          savePath = path.join("uploads/doctorprescription", uniqueName);
+          fieldName = "doctorPrescriptions";
+        }
+
+        fs.writeFileSync(savePath, fileBuffer);
+        const fileUrl = `/${uploadType === "report" ? "uploads/reports" : "uploads/doctorprescription"}/${uniqueName}`;
+
+        // Push into the array field
+        await Booking.findByIdAndUpdate(appointment._id, {
+          $push: { [fieldName]: fileUrl }
+        });
+
+        results.success++;
+      }
+
+      // Cleanup
+      fs.unlinkSync(zipPath);
+      fs.rmSync(extractDir, { recursive: true, force: true });
+
+      return res.status(200).json({
+        success: true,
+        message: "Bulk upload completed",
+        results,
+      });
+    } catch (error) {
+      console.error("Doctor bulk upload error:", error);
+      if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+      if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
+      return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    }
+  });
 };

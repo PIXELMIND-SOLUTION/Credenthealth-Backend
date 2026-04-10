@@ -178,6 +178,8 @@ import {
     getAllCompanyDiagnosticsByUser,
     getAllCompanyDiagnosticsByStaffPackages,
     addDiagnosticMultipleSlots,
+    bulkUploadDiagnostic,
+    bulkUploadDoctor,
 } from '../Controller/ControllerAdmin.js';
 import multer from 'multer';
 import { uploadBlogImage, uploadCategoryCSV, uploadCategoryImage, uploadCompanyCSV, uploadDiagnosticImage, uploadImages, uploadPackageCSV, uploadPrescriptionFile, uploadReportFile, uploadTestCSV, uploadTestImage, uploadXrayCSV, uploadXrayImage } from '../config/multerConfig.js';
@@ -441,6 +443,10 @@ router.post('/upload-doctor-report/:appointmentId', uploadReportFile, uploadDoct
 router.post('/upload-doctor-prescription/:appointmentId', uploadPrescriptionFile, uploadDoctorPrescription);
 router.post('/upload-report-diagnostic/:bookingId', uploadBookingReport);
 router.post('/upload-prescription-diagnostic/:bookingId', uploadDiagnosticPrescription);
+router.post("/bulk-upload-diagnostic", bulkUploadDiagnostic);
+router.post("/bulk-upload-doctor", bulkUploadDoctor);
+
+
 
 router.post("/create-packagebooking", createPackageBookingByAdmin);
 
