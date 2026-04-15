@@ -5934,28 +5934,29 @@ export const deleteStaff = async (req, res) => {
 
 
 
-// Controller to handle support ticket creation
 export const createSupportTicket = async (req, res) => {
   try {
     const { staffId, reason, description } = req.body;
 
     if (!staffId || !reason || !description) {
-      return res.status(400).json({ message: 'Staff ID, reason, and description are required.' });
+      return res.status(400).json({
+        message: "Staff ID, reason, and description are required.",
+      });
     }
 
-    // Check if the staff exists
+    // Check staff
     const staff = await Staff.findById(staffId);
     if (!staff) {
-      return res.status(404).json({ message: 'Staff not found.' });
+      return res.status(404).json({ message: "Staff not found." });
     }
 
-    // Upload file (if exists)
-    let filePath = '';
+    // File upload
+    let filePath = "";
     if (req.file) {
       filePath = `/uploads/support-tickets/${req.file.filename}`;
     }
 
-    // Create support ticket
+    // Create ticket
     const newTicket = new SupportTicket({
       staffId,
       reason,
@@ -5964,16 +5965,53 @@ export const createSupportTicket = async (req, res) => {
     });
 
     await newTicket.save();
-    res.status(201).json({
-      message: 'Support ticket created successfully.',
+
+    // =========================
+    // 📧 EMAIL TO SUPPORT TEAM
+    // =========================
+
+    const mailOptions = {
+      from: process.env.EMAIL,
+      to: "Support@credenthealth.com",
+      subject: `New Support Ticket - ${reason}`,
+
+      html: `
+        <div style="font-family:Arial;padding:20px;">
+          <h2>New Support Ticket Received</h2>
+
+          <h3>👤 Staff Details</h3>
+          <p><b>Name:</b> ${staff.name || "N/A"}</p>
+          <p><b>Email:</b> ${staff.email || "N/A"}</p>
+          <p><b>Contact:</b> ${staff.contact_number || "N/A"}</p>
+
+          <h3>🎫 Ticket Details</h3>
+          <p><b>Reason:</b> ${reason}</p>
+          <p><b>Description:</b> ${description}</p>
+
+          ${filePath ? `<p><b>Attachment:</b> ${filePath}</p>` : ""}
+
+          <hr/>
+          <p>Ticket ID: ${newTicket._id}</p>
+        </div>
+      `,
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    console.log("📧 Support email sent");
+
+    return res.status(201).json({
+      message: "Support ticket created successfully.",
       ticket: newTicket,
     });
   } catch (error) {
-    console.error('Error creating support ticket:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    console.error("Error creating support ticket:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
-
 
 
 // Submit an answer for a question

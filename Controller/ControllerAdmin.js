@@ -41,6 +41,7 @@ import csvParser from "csv-parser";
 import Cart from '../Models/Cart.js';
 import multer from "multer";
 import JSZip from "jszip";
+import SupportTicket from '../Models/SupportTicket.js';
 
 
 
@@ -9170,8 +9171,6 @@ export const getAllDiagnostics = async (req, res) => {
 
 
 
-// 📥 Get single diagnostic center by ID
-// 📥 Get single diagnostic center by ID
 export const getDiagnosticById = async (req, res) => {
   try {
     const { diagnosticId } = req.params;
@@ -9190,16 +9189,30 @@ export const getDiagnosticById = async (req, res) => {
       return res.status(404).json({ message: "Diagnostic center not found" });
     }
 
-    // NO FILTERING - सभी slots return करें
+    // 📅 TODAY DATE (start of day)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // 🔥 FILTER FUNCTION
+    const filterFutureSlots = (slots = []) => {
+      return slots.filter(slot => {
+        if (!slot.date) return false;
+        const slotDate = new Date(slot.date);
+        slotDate.setHours(0, 0, 0, 0);
+        return slotDate >= today;
+      });
+    };
+
     const diagnosticData = {
       ...diagnostic.toObject(),
-      // Original slots ही return करें
-      homeCollectionSlots: diagnostic.homeCollectionSlots || [],
-      centerVisitSlots: diagnostic.centerVisitSlots || []
+
+      // ✅ ONLY FUTURE + TODAY SLOTS
+      homeCollectionSlots: filterFutureSlots(diagnostic.homeCollectionSlots),
+      centerVisitSlots: filterFutureSlots(diagnostic.centerVisitSlots),
     };
 
     return res.status(200).json({
-      message: "Diagnostic fetched successfully with ALL slots",
+      message: "Diagnostic fetched successfully with future slots only",
       diagnostic: diagnosticData,
     });
 
@@ -12654,73 +12667,255 @@ const getDisplayBookingId = (booking) => {
   return null;
 };
 
+// export const bulkUploadDiagnostic = async (req, res) => {
+//   uploadZip(req, res, async (err) => {
+//     if (err) {
+//       console.error("Multer error:", err);
+//       return res.status(400).json({ success: false, message: "ZIP upload failed", error: err.message });
+//     }
+
+//     if (!req.file) {
+//       return res.status(400).json({ success: false, message: "No ZIP file uploaded" });
+//     }
+
+//     const uploadType = req.query.type; // "report" or "prescription"
+//     if (!uploadType || !["report", "prescription"].includes(uploadType)) {
+//       return res.status(400).json({ success: false, message: "Invalid type. Use ?type=report or ?type=prescription" });
+//     }
+
+//     const zipPath = req.file.path;
+//     const extractDir = `uploads/temp/extracted_${Date.now()}`;
+
+//     try {
+//       if (!fs.existsSync(extractDir)) fs.mkdirSync(extractDir, { recursive: true });
+
+//       const zipData = fs.readFileSync(zipPath);
+//       const zip = await JSZip.loadAsync(zipData);
+//       const files = Object.values(zip.files).filter(f => !f.dir);
+
+//       const results = { total: files.length, success: 0, failed: [] };
+
+//       // Fetch all bookings once for matching
+//       const allBookings = await Booking.find({});
+//       const bookingMap = new Map();
+//       allBookings.forEach(booking => {
+//         const displayId = getDisplayBookingId(booking);
+//         if (displayId) bookingMap.set(displayId, booking);
+//       });
+
+//       for (const file of files) {
+//         const fileName = file.name;
+//         const baseName = path.parse(fileName).name; // e.g., "DIA12345" or "PKG9876"
+//         const booking = bookingMap.get(baseName);
+
+//         if (!booking) {
+//           results.failed.push({ file: fileName, reason: "No matching booking ID" });
+//           continue;
+//         }
+
+//         const fileBuffer = await file.async("nodebuffer");
+//         const uniqueName = Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(fileName);
+//         const savePath = path.join("uploads/diagnosticReport", uniqueName); // reuse same folder
+//         fs.writeFileSync(savePath, fileBuffer);
+
+//         const updateField = uploadType === "report" ? "report_file" : "diagPrescription";
+//         await Booking.findByIdAndUpdate(booking._id, { [updateField]: `/uploads/diagnosticReport/${uniqueName}` });
+
+//         results.success++;
+//       }
+
+//       // Cleanup
+//       fs.unlinkSync(zipPath);
+//       fs.rmSync(extractDir, { recursive: true, force: true });
+
+//       return res.status(200).json({ success: true, message: "Bulk upload completed", results });
+//     } catch (error) {
+//       console.error("Bulk upload error:", error);
+//       if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+//       if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
+//       return res.status(500).json({ success: false, message: "Server error", error: error.message });
+//     }
+//   });
+// };
+
+
+
 export const bulkUploadDiagnostic = async (req, res) => {
   uploadZip(req, res, async (err) => {
-    if (err) {
-      console.error("Multer error:", err);
-      return res.status(400).json({ success: false, message: "ZIP upload failed", error: err.message });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: "No ZIP file uploaded" });
-    }
-
-    const uploadType = req.query.type; // "report" or "prescription"
-    if (!uploadType || !["report", "prescription"].includes(uploadType)) {
-      return res.status(400).json({ success: false, message: "Invalid type. Use ?type=report or ?type=prescription" });
-    }
-
-    const zipPath = req.file.path;
-    const extractDir = `uploads/temp/extracted_${Date.now()}`;
-
     try {
-      if (!fs.existsSync(extractDir)) fs.mkdirSync(extractDir, { recursive: true });
+      if (err) {
+        return res.status(400).json({
+          success: false,
+          message: "ZIP upload failed",
+          error: err.message,
+        });
+      }
 
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "No ZIP file uploaded",
+        });
+      }
+
+      // 📌 QUERY FLAGS
+      const uploadType = req.query.type; // report | prescription
+      const sendMail = req.query.sendMail === "true"; // 🔥 EMAIL CONTROL
+
+      if (!uploadType || !["report", "prescription"].includes(uploadType)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid type. Use ?type=report or ?type=prescription",
+        });
+      }
+
+      const zipPath = req.file.path;
       const zipData = fs.readFileSync(zipPath);
       const zip = await JSZip.loadAsync(zipData);
       const files = Object.values(zip.files).filter(f => !f.dir);
 
-      const results = { total: files.length, success: 0, failed: [] };
+      const results = {
+        total: files.length,
+        success: 0,
+        failed: [],
+      };
 
-      // Fetch all bookings once for matching
+      // 📦 Load all bookings
       const allBookings = await Booking.find({});
       const bookingMap = new Map();
-      allBookings.forEach(booking => {
-        const displayId = getDisplayBookingId(booking);
-        if (displayId) bookingMap.set(displayId, booking);
+
+      allBookings.forEach((b) => {
+        const displayId = b.diagnosticBookingId || b.packageBookingId;
+        if (displayId) bookingMap.set(displayId, b);
       });
 
+      // 🔁 PROCESS FILES
       for (const file of files) {
-        const fileName = file.name;
-        const baseName = path.parse(fileName).name; // e.g., "DIA12345" or "PKG9876"
-        const booking = bookingMap.get(baseName);
+        try {
+          const fileName = file.name;
+          const baseName = path.parse(fileName).name;
 
-        if (!booking) {
-          results.failed.push({ file: fileName, reason: "No matching booking ID" });
-          continue;
+          const booking = bookingMap.get(baseName);
+
+          if (!booking) {
+            results.failed.push({
+              file: fileName,
+              reason: "No matching booking ID",
+            });
+            continue;
+          }
+
+          const fileBuffer = await file.async("nodebuffer");
+
+          const uniqueName =
+            Date.now() +
+            "-" +
+            Math.round(Math.random() * 1e9) +
+            path.extname(fileName);
+
+          const savePath = path.join(
+            "uploads/diagnosticReport",
+            uniqueName
+          );
+
+          fs.writeFileSync(savePath, fileBuffer);
+
+          // 📌 Update booking
+          const updateField =
+            uploadType === "report"
+              ? "report_file"
+              : "diagPrescription";
+
+          await Booking.findByIdAndUpdate(booking._id, {
+            [updateField]: `/uploads/diagnosticReport/${uniqueName}`,
+          });
+
+          // =========================
+          // 📧 OPTIONAL EMAIL SECTION
+          // =========================
+
+          if (sendMail) {
+            const staff = await Staff.findById(booking.staffId);
+
+            if (staff?.email) {
+              try {
+                const subject = `Credent Health - ${uploadType === "report" ? "Report" : "Prescription"} Uploaded`;
+
+                const html = `
+                  <div style="font-family: Arial; padding:20px; background:#f4f6f9;">
+                    <div style="max-width:600px; margin:auto; background:#fff; padding:25px; border-radius:10px;">
+
+                      <h2 style="color:#2e7d32;">Credent Health Diagnostics</h2>
+
+                      <p>Dear <b>${staff.name || "Staff"}</b>,</p>
+
+                      <p>
+                        The <b>${uploadType}</b> has been successfully uploaded for the following booking.
+                      </p>
+
+                      <div style="background:#f9f9f9; padding:15px; border-radius:8px;">
+                        <p><b>Booking ID:</b> ${booking.diagnosticBookingId || booking.packageBookingId}</p>
+                        <p><b>Service Type:</b> ${booking.serviceType}</p>
+                        <p><b>Date:</b> ${booking.date}</p>
+                        <p><b>Time Slot:</b> ${booking.timeSlot}</p>
+                      </div>
+
+                      <p style="margin-top:15px; color:green;">
+                        Files are now available in your dashboard.
+                      </p>
+
+                      <p style="margin-top:20px;">
+                        Regards,<br/>
+                        <b>Credent Health Team</b>
+                      </p>
+
+                    </div>
+                  </div>
+                `;
+
+                await transporter.sendMail({
+                  from: process.env.EMAIL,
+                  to: staff.email,
+                  subject,
+                  html,
+                });
+
+                console.log("📧 Email sent to:", staff.email);
+              } catch (emailErr) {
+                console.error("Email error:", emailErr.message);
+              }
+            }
+          }
+
+          results.success++;
+        } catch (fileErr) {
+          results.failed.push({
+            file: file.name,
+            reason: fileErr.message,
+          });
         }
-
-        const fileBuffer = await file.async("nodebuffer");
-        const uniqueName = Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(fileName);
-        const savePath = path.join("uploads/diagnosticReport", uniqueName); // reuse same folder
-        fs.writeFileSync(savePath, fileBuffer);
-
-        const updateField = uploadType === "report" ? "report_file" : "diagPrescription";
-        await Booking.findByIdAndUpdate(booking._id, { [updateField]: `/uploads/diagnosticReport/${uniqueName}` });
-
-        results.success++;
       }
 
-      // Cleanup
+      // 🧹 CLEANUP
       fs.unlinkSync(zipPath);
-      fs.rmSync(extractDir, { recursive: true, force: true });
 
-      return res.status(200).json({ success: true, message: "Bulk upload completed", results });
+      return res.status(200).json({
+        success: true,
+        message: "Bulk upload completed successfully",
+        results,
+      });
     } catch (error) {
       console.error("Bulk upload error:", error);
-      if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-      if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
-      return res.status(500).json({ success: false, message: "Server error", error: error.message });
+
+      if (fs.existsSync(req.file?.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+
+      return res.status(500).json({
+        success: false,
+        message: "Server error",
+        error: error.message,
+      });
     }
   });
 };
@@ -12746,54 +12941,162 @@ const getDoctorDisplayBookingId = (appointment) => {
   return appointment.appointmentId?.toString() || null;
 };
 
+// export const bulkUploadDoctor = async (req, res) => {
+//   uploadDoctorZip(req, res, async (err) => {
+//     if (err) {
+//       console.error("Multer error (doctor bulk):", err);
+//       return res.status(400).json({ success: false, message: "ZIP upload failed", error: err.message });
+//     }
+
+//     if (!req.file) {
+//       return res.status(400).json({ success: false, message: "No ZIP file uploaded" });
+//     }
+
+//     const uploadType = req.query.type; // "report" or "prescription"
+//     if (!uploadType || !["report", "prescription"].includes(uploadType)) {
+//       return res.status(400).json({ success: false, message: "Invalid type. Use ?type=report or ?type=prescription" });
+//     }
+
+//     const zipPath = req.file.path;
+//     const extractDir = `uploads/temp_doctor_extracted_${Date.now()}`;
+
+//     try {
+//       if (!fs.existsSync(extractDir)) fs.mkdirSync(extractDir, { recursive: true });
+
+//       const zipData = fs.readFileSync(zipPath);
+//       const zip = await JSZip.loadAsync(zipData);
+//       const files = Object.values(zip.files).filter(f => !f.dir);
+
+//       const results = { total: files.length, success: 0, failed: [] };
+
+//       // Fetch all appointments once
+//       const allAppointments = await Booking.find({});
+//       const appointmentMap = new Map();
+//       allAppointments.forEach(appt => {
+//         const displayId = getDoctorDisplayBookingId(appt);
+//         if (displayId) appointmentMap.set(displayId, appt);
+//       });
+
+//       for (const file of files) {
+//         const fileName = file.name;
+//         const baseName = path.parse(fileName).name; // e.g., "DOC12345"
+//         const appointment = appointmentMap.get(baseName);
+
+//         if (!appointment) {
+//           results.failed.push({ file: fileName, reason: "No matching appointment ID" });
+//           continue;
+//         }
+
+//         const fileBuffer = await file.async("nodebuffer");
+//         const uniqueName = Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(fileName);
+//         let savePath, fieldName;
+
+//         if (uploadType === "report") {
+//           savePath = path.join("uploads/reports", uniqueName);
+//           fieldName = "doctorReports";
+//         } else {
+//           savePath = path.join("uploads/doctorprescription", uniqueName);
+//           fieldName = "doctorPrescriptions";
+//         }
+
+//         fs.writeFileSync(savePath, fileBuffer);
+//         const fileUrl = `/${uploadType === "report" ? "uploads/reports" : "uploads/doctorprescription"}/${uniqueName}`;
+
+//         // Push into the array field
+//         await Booking.findByIdAndUpdate(appointment._id, {
+//           $push: { [fieldName]: fileUrl }
+//         });
+
+//         results.success++;
+//       }
+
+//       // Cleanup
+//       fs.unlinkSync(zipPath);
+//       fs.rmSync(extractDir, { recursive: true, force: true });
+
+//       return res.status(200).json({
+//         success: true,
+//         message: "Bulk upload completed",
+//         results,
+//       });
+//     } catch (error) {
+//       console.error("Doctor bulk upload error:", error);
+//       if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+//       if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
+//       return res.status(500).json({ success: false, message: "Server error", error: error.message });
+//     }
+//   });
+// };
+
+
 export const bulkUploadDoctor = async (req, res) => {
   uploadDoctorZip(req, res, async (err) => {
     if (err) {
-      console.error("Multer error (doctor bulk):", err);
-      return res.status(400).json({ success: false, message: "ZIP upload failed", error: err.message });
+      return res.status(400).json({
+        success: false,
+        message: "ZIP upload failed",
+        error: err.message,
+      });
     }
 
     if (!req.file) {
-      return res.status(400).json({ success: false, message: "No ZIP file uploaded" });
+      return res.status(400).json({
+        success: false,
+        message: "No ZIP file uploaded",
+      });
     }
 
-    const uploadType = req.query.type; // "report" or "prescription"
+    const uploadType = req.query.type; // report | prescription
+    const sendMail = req.query.sendMail === "true"; // ✅ ADDED
+
     if (!uploadType || !["report", "prescription"].includes(uploadType)) {
-      return res.status(400).json({ success: false, message: "Invalid type. Use ?type=report or ?type=prescription" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid type. Use ?type=report or ?type=prescription",
+      });
     }
 
     const zipPath = req.file.path;
     const extractDir = `uploads/temp_doctor_extracted_${Date.now()}`;
 
     try {
-      if (!fs.existsSync(extractDir)) fs.mkdirSync(extractDir, { recursive: true });
+      if (!fs.existsSync(extractDir)) {
+        fs.mkdirSync(extractDir, { recursive: true });
+      }
 
       const zipData = fs.readFileSync(zipPath);
       const zip = await JSZip.loadAsync(zipData);
-      const files = Object.values(zip.files).filter(f => !f.dir);
+      const files = Object.values(zip.files).filter((f) => !f.dir);
 
       const results = { total: files.length, success: 0, failed: [] };
 
-      // Fetch all appointments once
       const allAppointments = await Booking.find({});
       const appointmentMap = new Map();
-      allAppointments.forEach(appt => {
+
+      allAppointments.forEach((appt) => {
         const displayId = getDoctorDisplayBookingId(appt);
         if (displayId) appointmentMap.set(displayId, appt);
       });
 
       for (const file of files) {
         const fileName = file.name;
-        const baseName = path.parse(fileName).name; // e.g., "DOC12345"
+        const baseName = path.parse(fileName).name;
+
         const appointment = appointmentMap.get(baseName);
 
         if (!appointment) {
-          results.failed.push({ file: fileName, reason: "No matching appointment ID" });
+          results.failed.push({
+            file: fileName,
+            reason: "No matching appointment ID",
+          });
           continue;
         }
 
         const fileBuffer = await file.async("nodebuffer");
-        const uniqueName = Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(fileName);
+
+        const uniqueName =
+          Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(fileName);
+
         let savePath, fieldName;
 
         if (uploadType === "report") {
@@ -12805,17 +13108,66 @@ export const bulkUploadDoctor = async (req, res) => {
         }
 
         fs.writeFileSync(savePath, fileBuffer);
-        const fileUrl = `/${uploadType === "report" ? "uploads/reports" : "uploads/doctorprescription"}/${uniqueName}`;
 
-        // Push into the array field
+        const fileUrl = `/${
+          uploadType === "report"
+            ? "uploads/reports"
+            : "uploads/doctorprescription"
+        }/${uniqueName}`;
+
         await Booking.findByIdAndUpdate(appointment._id, {
-          $push: { [fieldName]: fileUrl }
+          $push: { [fieldName]: fileUrl },
         });
+
+        // =========================
+        // 📧 EMAIL FEATURE ADDED
+        // =========================
+        if (sendMail) {
+          const emailHtml = `
+            <div style="font-family:Arial;padding:20px">
+              <h2 style="color:#1976d2">Credent Health</h2>
+
+              <p>Dear Patient,</p>
+
+              <p>
+                Your <b>${uploadType}</b> from your doctor has been successfully uploaded.
+              </p>
+
+              <p>
+                Booking ID: <b>${baseName}</b>
+              </p>
+
+              <p>
+                You can now login to your dashboard to view or download your medical files.
+              </p>
+
+              <hr/>
+
+              <p style="font-size:13px;color:#555">
+                For any queries, contact Credent Health Support.
+              </p>
+
+              <p><b>Website:</b> https://credenthealth.com</p>
+
+              <p>Regards,<br/>Credent Health Team</p>
+            </div>
+          `;
+
+          try {
+            await transporter.sendMail({
+              from: process.env.EMAIL,
+              to: appointment.patientEmail || appointment.email,
+              subject: `Doctor ${uploadType} Uploaded - Credent Health`,
+              html: emailHtml,
+            });
+          } catch (mailErr) {
+            console.log("Email error:", mailErr.message);
+          }
+        }
 
         results.success++;
       }
 
-      // Cleanup
       fs.unlinkSync(zipPath);
       fs.rmSync(extractDir, { recursive: true, force: true });
 
@@ -12826,9 +13178,73 @@ export const bulkUploadDoctor = async (req, res) => {
       });
     } catch (error) {
       console.error("Doctor bulk upload error:", error);
+
       if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-      if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
-      return res.status(500).json({ success: false, message: "Server error", error: error.message });
+      if (fs.existsSync(extractDir))
+        fs.rmSync(extractDir, { recursive: true, force: true });
+
+      return res.status(500).json({
+        success: false,
+        message: "Server error",
+        error: error.message,
+      });
     }
   });
+};
+
+
+
+export const getAllSupportTickets = async (req, res) => {
+  try {
+    const tickets = await SupportTicket.find()
+      .populate("staffId", "name email contact_number")
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      message: "Support tickets fetched successfully",
+      count: tickets.length,
+      tickets,
+    });
+
+  } catch (error) {
+    console.error("Get tickets error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+
+
+export const deleteSupportTicket = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+
+    const ticket = await SupportTicket.findById(ticketId);
+
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: "Support ticket not found",
+      });
+    }
+
+    await SupportTicket.findByIdAndDelete(ticketId);
+
+    return res.status(200).json({
+      success: true,
+      message: "Support ticket deleted successfully",
+    });
+
+  } catch (error) {
+    console.error("Delete ticket error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
 };

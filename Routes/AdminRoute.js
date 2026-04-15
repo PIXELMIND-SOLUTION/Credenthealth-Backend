@@ -180,6 +180,8 @@ import {
     addDiagnosticMultipleSlots,
     bulkUploadDiagnostic,
     bulkUploadDoctor,
+    getAllSupportTickets,
+    deleteSupportTicket,
 } from '../Controller/ControllerAdmin.js';
 import multer from 'multer';
 import { uploadBlogImage, uploadCategoryCSV, uploadCategoryImage, uploadCompanyCSV, uploadDiagnosticImage, uploadImages, uploadPackageCSV, uploadPrescriptionFile, uploadReportFile, uploadTestCSV, uploadTestImage, uploadXrayCSV, uploadXrayImage } from '../config/multerConfig.js';
@@ -531,7 +533,9 @@ router.get("/allcompaniesdiagnostics/:companyId", getAllCompanyDiagnostics);
 router.get("/allcompaniesdiagnostics/:companyId/:staffId", getAllCompanyDiagnosticsByUser);
 router.get("/allcompaniespackdiagnostics/:companyId/:staffId", getAllCompanyDiagnosticsByStaffPackages);
 
+router.get("/allraisedtickets", getAllSupportTickets);
 
+router.delete("/deleteraisedtickets/:ticketId", deleteSupportTicket);
 
 
 

@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 // Support Schema
 const supportTicketSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', },
+  staffId: { type: mongoose.Schema.Types.ObjectId, ref: 'Staff' }, // ✅ FIXED
   reason: { type: String, enum: ['Payment Issues', 'Booking Issues', 'Technical Issues', 'Account Issue', 'Consultation Issue', 'App Bug', 'Other'], required: true },
   description: { type: String, },
   status: { type: String, default: 'Open' }, // Open, In Progress, Closed
