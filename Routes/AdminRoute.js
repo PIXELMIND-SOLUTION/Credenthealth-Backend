@@ -182,6 +182,7 @@ import {
     bulkUploadDoctor,
     getAllSupportTickets,
     deleteSupportTicket,
+    createBulkDiagnosticBookings,
 } from '../Controller/ControllerAdmin.js';
 import multer from 'multer';
 import { uploadBlogImage, uploadCategoryCSV, uploadCategoryImage, uploadCompanyCSV, uploadDiagnosticImage, uploadImages, uploadPackageCSV, uploadPrescriptionFile, uploadReportFile, uploadTestCSV, uploadTestImage, uploadXrayCSV, uploadXrayImage } from '../config/multerConfig.js';
@@ -537,6 +538,7 @@ router.get("/allraisedtickets", getAllSupportTickets);
 
 router.delete("/deleteraisedtickets/:ticketId", deleteSupportTicket);
 
+router.post("/create-bulk-diagnostic-bookings", createBulkDiagnosticBookings);
 
 
 

@@ -42,6 +42,7 @@ import Cart from '../Models/Cart.js';
 import multer from "multer";
 import JSZip from "jszip";
 import SupportTicket from '../Models/SupportTicket.js';
+import Counter from '../Models/Counter.js';
 
 
 
@@ -70,6 +71,26 @@ dayjs.extend(customParseFormat);
 
 
 
+
+const getNextPackageBookingId = async () => {
+  const counter = await Counter.findOneAndUpdate(
+    { name: "packageBooking" },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true }
+  );
+  const seqNum = counter.seq.toString().padStart(4, "0");
+  return `PKG-${seqNum}`;
+};
+
+const getNextDiagnosticBookingId = async () => {
+  const counter = await Counter.findOneAndUpdate(
+    { name: "diagnosticBooking" },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true }
+  );
+  const seqNum = counter.seq.toString().padStart(4, "0");
+  return `DIA-${seqNum}`;
+};
 
 
 // Admin Signup
@@ -3744,174 +3765,132 @@ export const updateCompany = (req, res) => {
 
 export const getCompanies = async (req, res) => {
   try {
-    const companies = await Company.find().sort({ createdAt: -1 });
+    const companies = await Company.find().lean();
 
-    // Sabhi companies ke liye statistics calculate karna
-    const companiesWithStats = await Promise.all(
+    const result = await Promise.all(
       companies.map(async (company) => {
-        // Company ke saare staff IDs collect karo
-        const companyStaffIds = company.staff.map(staff => staff._id);
 
-        // Diagnostic statistics collect karo
+        const staffIds = company.staff.map(s => s._id);
+
+        // 🔥 ONLY REQUIRED FIELDS (IMPORTANT FIX)
+        const staffs = await Staff.find(
+          { _id: { $in: staffIds } },
+          "wallet_balance forTests forDoctors forPackages totalAmount"
+        ).lean();
+
+        // 🔥 MAP
+        const staffMap = {};
+        staffs.forEach(s => {
+          staffMap[s._id.toString()] = s;
+        });
+
+        // 🔥 SAFE MERGE (NO HEAVY DATA)
+        const mergedStaff = company.staff.map(s => {
+          const wallet = staffMap[s._id.toString()] || {};
+
+          return {
+            ...s, // 👈 original company staff
+
+            wallet_balance: wallet.wallet_balance || 0,
+            forTests: wallet.forTests || 0,
+            forDoctors: wallet.forDoctors || 0,
+            forPackages: wallet.forPackages || 0,
+            totalAmount: wallet.totalAmount || 0
+          };
+        });
+
+        // ======================
+        // 🔥 DIAGNOSTICS (LIGHT VERSION)
+        // ======================
         const diagnosticsStats = {};
         let totalTests = 0;
         let totalPackages = 0;
         let totalScans = 0;
-        let totalStaffWithAssignments = 0;
-        const assignedStaffSet = new Set();
 
-        // Staff ke assigned items process karo
-        const staffs = await Staff.find({ 
-          _id: { $in: companyStaffIds } 
-        }).select('myTests myPackages myScans name email employeeId');
+        const fullStaff = await Staff.find({
+          _id: { $in: staffIds }
+        }).select("myTests myPackages myScans").lean();
 
-        staffs.forEach(staff => {
-          // Tests
-          staff.myTests.forEach(test => {
-            if (test.diagnosticId) {
-              const diagId = test.diagnosticId.toString();
-              if (!diagnosticsStats[diagId]) {
-                diagnosticsStats[diagId] = {
-                  diagnosticId: diagId,
-                  tests: 0,
-                  packages: 0,
-                  scans: 0,
-                  staffIds: new Set()
-                };
-              }
-              diagnosticsStats[diagId].tests++;
-              diagnosticsStats[diagId].staffIds.add(staff._id.toString());
-              assignedStaffSet.add(staff._id.toString());
-              totalTests++;
-            }
+        fullStaff.forEach(staff => {
+          staff.myTests?.forEach(t => {
+            const id = t.diagnosticId?.toString();
+            if (!id) return;
+
+            diagnosticsStats[id] ??= { tests: 0, packages: 0, scans: 0 };
+            diagnosticsStats[id].tests++;
+            totalTests++;
           });
 
-          // Packages
-          staff.myPackages.forEach(pkg => {
-            if (pkg.diagnosticId) {
-              const diagId = pkg.diagnosticId.toString();
-              if (!diagnosticsStats[diagId]) {
-                diagnosticsStats[diagId] = {
-                  diagnosticId: diagId,
-                  tests: 0,
-                  packages: 0,
-                  scans: 0,
-                  staffIds: new Set()
-                };
-              }
-              diagnosticsStats[diagId].packages++;
-              diagnosticsStats[diagId].staffIds.add(staff._id.toString());
-              assignedStaffSet.add(staff._id.toString());
-              totalPackages++;
-            }
+          staff.myPackages?.forEach(p => {
+            const id = p.diagnosticId?.toString();
+            if (!id) return;
+
+            diagnosticsStats[id] ??= { tests: 0, packages: 0, scans: 0 };
+            diagnosticsStats[id].packages++;
+            totalPackages++;
           });
 
-          // Scans
-          staff.myScans.forEach(scan => {
-            if (scan.diagnosticId) {
-              const diagId = scan.diagnosticId.toString();
-              if (!diagnosticsStats[diagId]) {
-                diagnosticsStats[diagId] = {
-                  diagnosticId: diagId,
-                  tests: 0,
-                  packages: 0,
-                  scans: 0,
-                  staffIds: new Set()
-                };
-              }
-              diagnosticsStats[diagId].scans++;
-              diagnosticsStats[diagId].staffIds.add(staff._id.toString());
-              assignedStaffSet.add(staff._id.toString());
-              totalScans++;
-            }
+          staff.myScans?.forEach(sc => {
+            const id = sc.diagnosticId?.toString();
+            if (!id) return;
+
+            diagnosticsStats[id] ??= { tests: 0, packages: 0, scans: 0 };
+            diagnosticsStats[id].scans++;
+            totalScans++;
           });
         });
 
-        // Diagnostic details fetch karo
-        const diagnosticIds = Object.keys(diagnosticsStats);
-        const diagnostics = await Diagnostic.find({ 
-          _id: { $in: diagnosticIds } 
-        }).select('name email phone address city centerType');
+        const diagnostics = await Diagnostic.find({
+          _id: { $in: Object.keys(diagnosticsStats) }
+        }).lean();
 
-        // Diagnostic data map karo
-        const diagnosticData = diagnostics.map(diagnostic => {
-          const stats = diagnosticsStats[diagnostic._id.toString()] || {
-            tests: 0,
-            packages: 0,
-            scans: 0,
-            staffIds: new Set()
-          };
+        const diagnosticData = diagnostics.map(d => {
+          const stats = diagnosticsStats[d._id.toString()] || {};
 
           return {
-            _id: diagnostic._id,
-            name: diagnostic.name,
-            email: diagnostic.email,
-            phone: diagnostic.phone,
-            address: diagnostic.address,
-            city: diagnostic.city,
-            centerType: diagnostic.centerType,
+            _id: d._id,
+            name: d.name,
             statistics: {
-              tests: stats.tests,
-              packages: stats.packages,
-              scans: stats.scans,
-              totalItems: stats.tests + stats.packages + stats.scans,
-              staffAssigned: stats.staffIds.size
+              tests: stats.tests || 0,
+              packages: stats.packages || 0,
+              scans: stats.scans || 0,
+              forPackages: stats.packages || 0,
+              totalItems:
+                (stats.tests || 0) +
+                (stats.packages || 0) +
+                (stats.scans || 0)
             }
           };
         });
 
-        // Company ke totals calculate karo
-        const companyTotals = {
-          totalStaff: company.staff.length,
-          totalTests,
-          totalPackages,
-          totalScans,
-          totalItems: totalTests + totalPackages + totalScans,
-          totalDiagnostics: diagnosticData.length,
-          staffWithAssignments: assignedStaffSet.size,
-          assignmentPercentage: company.staff.length > 0 
-            ? ((assignedStaffSet.size / company.staff.length) * 100).toFixed(2) 
-            : 0
-        };
-
         return {
-          ...company.toObject(),
-          statistics: companyTotals,
+          ...company,
+          staff: mergedStaff, // ✅ FIXED
           diagnostics: diagnosticData,
-          staffSummary: {
-            total: company.staff.length,
-            withAssignments: assignedStaffSet.size,
-            withoutAssignments: company.staff.length - assignedStaffSet.size
+          statistics: {
+            totalStaff: mergedStaff.length,
+            totalTests,
+            totalPackages,
+            totalScans
           }
         };
       })
     );
 
-    res.status(200).json({
-      message: 'Companies fetched successfully with statistics',
-      companies: companiesWithStats,
-      timestamp: new Date(),
-      totalCompanies: companiesWithStats.length,
-      globalStats: {
-        totalCompanies: companiesWithStats.length,
-        totalStaff: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalStaff, 0),
-        totalTests: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalTests, 0),
-        totalPackages: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalPackages, 0),
-        totalScans: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalScans, 0),
-        totalDiagnostics: companiesWithStats.reduce((sum, company) => sum + company.statistics.totalDiagnostics, 0)
-      }
+    return res.json({
+      message: "Companies fetched successfully",
+      companies: result
     });
 
-  } catch (error) {
-    console.error('Error fetching companies with stats:', error);
-    res.status(500).json({ 
-      message: 'Server error', 
-      error: error.message 
+  } catch (err) {
+    console.error("❌ ERROR:", err);
+
+    return res.status(500).json({
+      message: "Server error",
+      error: err.message
     });
   }
 };
-
-
 export const getCompanyById = async (req, res) => {
   try {
     const { companyId } = req.params;
@@ -13248,3 +13227,351 @@ export const deleteSupportTicket = async (req, res) => {
     });
   }
 };
+
+
+export const createBulkDiagnosticBookings = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { bookings, companyId, branchId, diagnosticId, totalAmount, sendEmails = false } = req.body;
+
+    if (!bookings || !Array.isArray(bookings) || bookings.length === 0) {
+      return res.status(400).json({ message: "Bookings array is required", isSuccessfull: false });
+    }
+
+    const diagnostic = await Diagnostic.findById(diagnosticId).session(session);
+    if (!diagnostic) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ message: "Diagnostic centre not found", isSuccessfull: false });
+    }
+
+    const staffIds = [...new Set(bookings.map(b => b.staffId))];
+    const staffMap = new Map();
+    for (const id of staffIds) {
+      const staff = await Staff.findById(id).session(session);
+      if (!staff) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(404).json({ message: `Staff ${id} not found`, isSuccessfull: false });
+      }
+      staffMap.set(id, staff);
+    }
+
+    const packageIds = [...new Set(bookings.map(b => b.itemId))];
+    const packageMap = new Map();
+    for (const id of packageIds) {
+      const pkg = await Package.findById(id).session(session);
+      if (!pkg) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(404).json({ message: `Package ${id} not found`, isSuccessfull: false });
+      }
+      packageMap.set(id, pkg);
+    }
+
+    const createdBookings = [];
+    let totalWalletUsed = 0;
+    let totalOnlinePaymentUsed = 0;
+    const failedBookings = [];
+
+    for (let idx = 0; idx < bookings.length; idx++) {
+      const bookingData = bookings[idx];
+      const {
+        staffId,
+        familyMemberId = null,
+        diagnosticId: bookingDiagnosticId,
+        itemId: packageId,
+        serviceType,
+        date,
+        timeSlot,
+        notes = "",
+        amount
+      } = bookingData;
+
+      if (!staffId || !packageId || !serviceType || !date || !timeSlot) {
+        failedBookings.push({ index: idx, reason: "Missing required fields", bookingData });
+        continue;
+      }
+
+      const staff = staffMap.get(staffId);
+      if (!staff) {
+        failedBookings.push({ index: idx, reason: "Staff not found", staffId });
+        continue;
+      }
+
+      const packageData = packageMap.get(packageId);
+      if (!packageData) {
+        failedBookings.push({ index: idx, reason: "Package not found", packageId });
+        continue;
+      }
+
+      if (!["Home Collection", "Center Visit"].includes(serviceType)) {
+        failedBookings.push({ index: idx, reason: "Invalid service type", serviceType });
+        continue;
+      }
+
+      const bookingDate = moment(date, ["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"]).isValid()
+        ? moment(date, ["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"]).format("YYYY-MM-DD")
+        : null;
+
+      if (!bookingDate) {
+        failedBookings.push({ index: idx, reason: "Invalid date format", date });
+        continue;
+      }
+
+      const payableAmount = packageData.offerPrice || packageData.price;
+      let availablePackageBalance = staff.forPackages || 0;
+      let walletUsed = 0;
+      let onlinePaymentUsed = 0;
+
+      if (availablePackageBalance >= payableAmount) {
+        walletUsed = payableAmount;
+        staff.wallet_balance = (staff.wallet_balance || 0) - walletUsed;
+        staff.forPackages = (staff.forPackages || 0) - walletUsed;
+      } else {
+        walletUsed = availablePackageBalance;
+        onlinePaymentUsed = payableAmount - walletUsed;
+        staff.wallet_balance = (staff.wallet_balance || 0) - walletUsed;
+        staff.forPackages = 0;
+      }
+
+      if (walletUsed > 0) {
+        staff.wallet_logs.push({
+          type: "debit",
+          forDoctors: 0,
+          forTests: 0,
+          forPackages: walletUsed,
+          totalAmount: walletUsed,
+          from: "Bulk Package Booking",
+          date: new Date(),
+        });
+      }
+
+      staff.markModified('wallet_balance');
+      staff.markModified('forPackages');
+      staff.markModified('wallet_logs');
+
+      // 🔥 Generate UNIQUE IDs for each booking using atomic counters
+      const packageBookingId = await getNextPackageBookingId();
+      const diagnosticBookingId = await getNextDiagnosticBookingId();
+
+      const booking = new Booking({
+        staffId,
+        familyMemberId: familyMemberId === "null" ? null : familyMemberId,
+        diagnosticId: bookingDiagnosticId,
+        packageId,
+        serviceType,
+        date: bookingDate,
+        timeSlot,
+        totalPrice: payableAmount,
+        discount: 0,
+        payableAmount,
+        status: "Confirmed",
+        transactionId: null,
+        paymentStatus: onlinePaymentUsed > 0 ? "captured" : "wallet",
+        paymentDetails: null,
+        isSuccessfull: true,
+        packageBookingId,
+        diagnosticBookingId,
+        notes: notes || "",
+        companyId,
+        branchId
+      });
+
+      const savedBooking = await booking.save({ session });
+      createdBookings.push(savedBooking);
+
+      totalWalletUsed += walletUsed;
+      totalOnlinePaymentUsed += onlinePaymentUsed;
+
+      // Update diagnostic slot
+      const updateSlots = (slots) =>
+        slots.map(slot => {
+          if (slot.date === bookingDate && slot.timeSlot === timeSlot && !slot.isBooked) {
+            slot.isBooked = true;
+          }
+          return slot;
+        });
+
+      if (serviceType === "Home Collection") {
+        diagnostic.homeCollectionSlots = updateSlots(diagnostic.homeCollectionSlots);
+      } else {
+        diagnostic.centerVisitSlots = updateSlots(diagnostic.centerVisitSlots);
+      }
+
+      staff.notifications.push({
+        title: "Package Booking Confirmed (Bulk)",
+        message: `Your package booking for ${bookingDate} at ${timeSlot || "N/A"} has been confirmed as part of a bulk booking.`,
+        timestamp: new Date(),
+        bookingId: savedBooking._id,
+      });
+
+      await staff.save({ session });
+    }
+
+    await diagnostic.save({ session });
+    await session.commitTransaction();
+    session.endSession();
+
+    if (sendEmails === true) {
+      Promise.all(
+        createdBookings.map(async (booking) => {
+          try {
+            const staff = staffMap.get(booking.staffId);
+            const packageData = packageMap.get(booking.packageId);
+            const diagnostic = await Diagnostic.findById(booking.diagnosticId);
+            if (staff && packageData && diagnostic) {
+              await sendBulkBookingEmail(staff, packageData, diagnostic, booking);
+            }
+          } catch (err) {
+            console.error(`Failed to send email for booking ${booking.packageBookingId}:`, err);
+          }
+        })
+      ).catch(err => console.error("Email sending error in bulk:", err));
+    }
+
+    return res.status(201).json({
+      message: "Bulk bookings created successfully",
+      isSuccessfull: true,
+      createdCount: createdBookings.length,
+      failedCount: failedBookings.length,
+      totalWalletUsed,
+      totalOnlinePaymentUsed,
+      emailsSent: sendEmails ? createdBookings.length : 0,
+      createdBookings: createdBookings.map(b => ({
+        packageBookingId: b.packageBookingId,
+        diagnosticBookingId: b.diagnosticBookingId,
+        staffId: b.staffId,
+        amount: b.payableAmount
+      })),
+      failedBookings
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    console.error("Bulk booking error:", error);
+    return res.status(500).json({
+      message: "Server error while creating bulk bookings",
+      isSuccessfull: false,
+      error: error.message
+    });
+  }
+};
+// Helper to send email for a single bulk booking (identical to single booking email)
+async function sendBulkBookingEmail(staff, packageData, diagnostic, booking) {
+  try {
+    const { packageBookingId, diagnosticBookingId, date, timeSlot, serviceType, payableAmount } = booking;
+    const walletUsed = staff.wallet_logs.find(log => log.from === "Bulk Package Booking" && log.forPackages > 0)?.forPackages || 0;
+    const onlinePaymentUsed = payableAmount - walletUsed;
+
+    let contactPersonInfo = "";
+    if (diagnostic.contactPersons && diagnostic.contactPersons.length > 0) {
+      const primaryContact = diagnostic.contactPersons[0];
+      contactPersonInfo = `
+        <div style="margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px;">
+          <p style="margin: 5px 0;"><strong>📞 Primary Contact Person:</strong></p>
+          <p style="margin: 5px 0;"><strong>Name:</strong> ${primaryContact.name || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Designation:</strong> ${primaryContact.designation || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Contact Number:</strong> ${primaryContact.contactNumber || "N/A"}</p>
+          <p style="margin: 5px 0;"><strong>Contact Email:</strong> ${primaryContact.contactEmail || "N/A"}</p>
+        </div>
+      `;
+    }
+
+    let serviceAddress = "";
+    if (serviceType === "Home Collection") {
+      serviceAddress = `
+        <p><strong>🏠 Home Collection Address:</strong></p>
+        <p>${staff.address || "Address will be shared by the diagnostic center"}</p>
+        <p><em>Our representative will visit this address for sample collection</em></p>
+      `;
+    } else {
+      serviceAddress = `
+        <p><strong>📍 Diagnostic Centre Address:</strong></p>
+        <p><strong>Address:</strong> ${diagnostic.address || "Address not available"}</p>
+        <p><strong>City:</strong> ${diagnostic.city || "N/A"}</p>
+        <p><strong>State:</strong> ${diagnostic.state || "N/A"}</p>
+        <p><strong>Pincode:</strong> ${diagnostic.pincode || "N/A"}</p>
+        <p><em>Please visit the center at your scheduled time</em></p>
+      `;
+    }
+
+    const mailOptions = {
+      from: `"Credent Health" <${process.env.EMAIL}>`,
+      to: staff.email,
+      subject: `Package Booking Confirmed - ${packageBookingId}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Package Booking Confirmation</title>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; color: white; border-radius: 8px 8px 0 0; }
+            .content { padding: 20px; background-color: #fff; }
+            .section { background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid; }
+            .booking-section { border-left-color: #3498db; }
+            .package-section { border-left-color: #9b59b6; }
+            .diagnostic-section { border-left-color: #2ecc71; }
+            .address-section { border-left-color: #f39c12; }
+            .user-section { border-left-color: #e74c3c; }
+            .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 14px; }
+            h1, h2, h3 { color: #2c3e50; }
+            strong { color: #2c3e50; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1 style="margin: 0; color: white;">Package Booking Confirmed!</h1>
+          </div>
+          
+          <div class="content">
+            <p>Hello <strong>${staff.name}</strong>,</p>
+            <p>Your health package booking (part of bulk booking) has been successfully confirmed. Here are the details:</p>
+            
+            <div class="section booking-section">
+              <h3 style="margin-top: 0;">📋 Booking Summary</h3>
+              <p><strong>Package Booking ID:</strong> ${packageBookingId}</p>
+              <p><strong>Diagnostic Booking ID:</strong> ${diagnosticBookingId}</p>
+              <p><strong>Booking Date:</strong> ${moment(date).format('DD MMM YYYY')}</p>
+              <p><strong>Time Slot:</strong> ${timeSlot || "Will be scheduled"}</p>
+              <p><strong>Service Type:</strong> ${serviceType}</p>
+              <p><strong>Package Amount:</strong> ₹${payableAmount}</p>
+              <p><strong>Payment Mode:</strong> ${walletUsed > 0 ? 'Wallet' + (onlinePaymentUsed > 0 ? ' + Online' : '') : 'Online Payment'}</p>
+              ${walletUsed > 0 ? `<p><strong>Wallet Used:</strong> ₹${walletUsed}</p>` : ''}
+              ${onlinePaymentUsed > 0 ? `<p><strong>Online Payment:</strong> ₹${onlinePaymentUsed}</p>` : ''}
+            </div>
+            
+            <div class="section diagnostic-section">
+              <h3 style="margin-top: 0;">🏥 Diagnostic Centre Details</h3>
+              <p><strong>Centre Name:</strong> ${diagnostic.name}</p>
+              <p><strong>Email:</strong> ${diagnostic.email}</p>
+              <p><strong>Phone:</strong> ${diagnostic.phone}</p>
+              ${contactPersonInfo}
+            </div>
+            
+            <div class="section address-section">
+              <h3 style="margin-top: 0;">📍 Service Address</h3>
+              ${serviceAddress}
+            </div>
+
+            <div class="footer">
+              <p>For any assistance, contact support@credenthealth.com</p>
+              <p>Thank you for choosing Credent Health!</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+  } catch (err) {
+    console.error(`Email sending failed for ${staff.email}:`, err);
+  }
+}
