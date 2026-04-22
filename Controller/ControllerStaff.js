@@ -3239,7 +3239,7 @@ export const myBookings = async (req, res) => {
     const staffId = req.params.staffId;
 
     const staff = await Staff.findById(staffId);
-    if (!staff) return res.status(404).json({ message: 'Staff not found' });
+    if (!staff) return res.status(404).json({ message: "Staff not found" });
 
     const bookings = await Booking.find({ staffId })
       .populate("diagnosticId", "name distance image address homeCollection centerVisit description doctorId doctorConsultationBookingId diagnosticBookingId")
@@ -3248,45 +3248,30 @@ export const myBookings = async (req, res) => {
       .populate("doctorId", "name email image specialization qualification address")
       .lean();
 
-    // ✅ FIX 1: Sorting by creation date (newest first)
-    bookings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    // ✅ SORT BY date + timeSlot (CORRECT FIX)
+    const getDateTime = (booking) => {
+      if (!booking.date) return new Date(0);
 
-    // Store notifications that need to be saved
+      try {
+        return new Date(`${booking.date}T${booking.timeSlot || "00:00"}`);
+      } catch {
+        return new Date(0);
+      }
+    };
+
+    bookings.sort((a, b) => getDateTime(b) - getDateTime(a));
+
     const notificationsToAdd = [];
 
     const populatedBookings = await Promise.all(
       bookings.map(async (booking) => {
-        let formattedDate = null;
-        let bookingDateTime = null;
+        let bookingDateTime = getDateTime(booking);
 
-        if (booking.date) {
-          const dateObj = new Date(booking.date);
-          if (!isNaN(dateObj)) {
-            formattedDate = dateObj.toISOString().split('T')[0];
-            bookingDateTime = new Date(dateObj);
-          }
-        }
-
-        if (bookingDateTime && booking.timeSlot) {
-          try {
-            const [time, modifier] = booking.timeSlot.split(" ");
-            let [hours, minutes] = time.split(":").map(Number);
-
-            if (modifier === "PM" && hours !== 12) hours += 12;
-            if (modifier === "AM" && hours === 12) hours = 0;
-
-            bookingDateTime.setHours(hours);
-            bookingDateTime.setMinutes(minutes);
-            bookingDateTime.setSeconds(0);
-          } catch (err) {
-            console.warn("⚠️ Invalid timeSlot format:", booking.timeSlot);
-          }
-        }
-
-        // Reminder logic
+        // 🔔 Reminder logic
         const now = new Date();
         let notifyMsg = null;
-        if (bookingDateTime && !isNaN(bookingDateTime)) {
+
+        if (!isNaN(bookingDateTime)) {
           const diffInMs = bookingDateTime - now;
           const diffInHours = diffInMs / (1000 * 60 * 60);
           const diffInDays = diffInMs / (1000 * 60 * 60 * 24);
@@ -3300,14 +3285,12 @@ export const myBookings = async (req, res) => {
           }
         }
 
-        // Check if already notified
         const alreadyNotified = staff.notifications?.some(
           (n) =>
             n.bookingId?.toString() === booking._id.toString() &&
             n.message === notifyMsg
         );
 
-        // Add to notifications array if needed
         if (notifyMsg && !alreadyNotified) {
           notificationsToAdd.push({
             title: "Booking Reminder",
@@ -3322,102 +3305,85 @@ export const myBookings = async (req, res) => {
             member._id.toString() === booking.familyMemberId?.toString()
         );
 
-        // ✅ FIX 2: अब booking.items से items लें (cart.items से नहीं)
+        // ✅ ITEMS FIX
         let populatedItems = [];
 
-        // पहले booking.items check करें (नया approach)
-        if (booking.items && booking.items.length > 0) {
+        if (booking.items?.length) {
           populatedItems = await Promise.all(
             booking.items.map(async (item) => {
               let details = null;
+
               if (item.type === "xray") {
                 details = await Xray.findById(item.itemId).lean();
               } else if (item.type === "test") {
                 details = await Test.findById(item.itemId).lean();
               }
-              return { 
-                ...item, 
+
+              return {
+                ...item,
                 itemDetails: details || null,
-                // Ensure all fields are included
-                _id: item._id || item.itemId,
-                type: item.type,
-                title: item.title,
-                quantity: item.quantity,
-                price: item.price,
-                offerPrice: item.offerPrice,
-                totalPayable: item.totalPayable,
-                totalPrice: item.totalPrice
               };
             })
           );
-        }
-        // Fallback: अगर booking.items नहीं है तो cart.items check करें
-        else if (booking.cartId?.items?.length) {
+        } else if (booking.cartId?.items?.length) {
           populatedItems = await Promise.all(
             booking.cartId.items.map(async (item) => {
               let details = null;
+
               if (item.type === "xray") {
                 details = await Xray.findById(item.itemId).lean();
               } else if (item.type === "test") {
                 details = await Test.findById(item.itemId).lean();
               }
+
               return { ...item, itemDetails: details || null };
             })
           );
         }
 
-        // Format booking date for display
-        const displayDate = booking.createdAt 
-          ? new Date(booking.createdAt).toLocaleDateString('en-IN', {
-              day: 'numeric',
-              month: 'short',
-              year: 'numeric'
+        // 🕒 Display formatting
+        const displayDate = booking.createdAt
+          ? new Date(booking.createdAt).toLocaleDateString("en-IN", {
+              day: "numeric",
+              month: "short",
+              year: "numeric",
             })
-          : '';
+          : "";
 
         const displayTime = booking.createdAt
-          ? new Date(booking.createdAt).toLocaleTimeString('en-IN', {
-              hour: '2-digit',
-              minute: '2-digit'
+          ? new Date(booking.createdAt).toLocaleTimeString("en-IN", {
+              hour: "2-digit",
+              minute: "2-digit",
             })
-          : '';
+          : "";
 
         return {
-          // ✅ नया field: booking creation timestamp
           createdAt: booking.createdAt,
           createdAtDisplay: `${displayDate} at ${displayTime}`,
-          
+
           bookingId: booking._id,
           serviceType: booking.serviceType || "",
           type: booking.type || "",
           meetingLink: booking.meetingLink || null,
-          bookedSlot: booking.bookedSlot
-            ? {
-                ...booking.bookedSlot,
-                date: booking.bookedSlot.date
-                  ? new Date(booking.bookedSlot.date).toISOString().split('T')[0]
-                  : null,
-              }
-            : null,
           status: booking.status,
-          date: formattedDate || null,
+
+          date: booking.date || null,
           timeSlot: booking.timeSlot,
+
           totalPrice: booking.totalPrice,
           discount: booking.discount,
           payableAmount: booking.payableAmount,
+
           doctorConsultationBookingId: booking.doctorConsultationBookingId || null,
           doctorId: booking.doctorId || null,
           diagnosticBookingId: booking.diagnosticBookingId || null,
 
           diagnostic: booking.diagnosticId
             ? {
-              diagnosticId: booking.diagnosticId,
+                diagnosticId: booking.diagnosticId,
                 name: booking.diagnosticId.name,
                 description: booking.diagnosticId.description,
                 image: booking.diagnosticId.image,
-                distance: booking.diagnosticId.distance,
-                homeCollection: booking.diagnosticId.homeCollection,
-                centerVisit: booking.diagnosticId.centerVisit,
                 address: booking.diagnosticId.address,
               }
             : null,
@@ -3448,16 +3414,10 @@ export const myBookings = async (req, res) => {
             name: staff.name,
             email: staff.email,
             contact_number: staff.contact_number,
-            // Branch intentionally excluded as per requirement
           },
 
-          // ✅ FIX 3: अब यह booking.items show करेगा
           cartItems: populatedItems,
-          
-          // Debug info
-          itemsSource: booking.items ? "booking.items" : "cart.items",
-          itemsCount: populatedItems.length,
-          
+
           reportFile: booking.report_file || null,
           diagPrescription: booking.diagPrescription || null,
           doctorReports: booking.doctorReports || [],
@@ -3466,34 +3426,23 @@ export const myBookings = async (req, res) => {
       })
     );
 
-    // Only update notifications if there are new ones
     if (notificationsToAdd.length > 0) {
-      await Staff.findByIdAndUpdate(
-        staffId,
-        { 
-          $push: { 
-            notifications: { 
-              $each: notificationsToAdd 
-            } 
-          } 
-        },
-        { runValidators: false }
-      );
+      await Staff.findByIdAndUpdate(staffId, {
+        $push: { notifications: { $each: notificationsToAdd } },
+      });
     }
 
     res.status(200).json({
       success: true,
       bookings: populatedBookings,
-      // Debug info
       totalBookings: populatedBookings.length,
-      sortedBy: "createdAt (newest first)"
+      sortedBy: "date + timeSlot (latest first)",
     });
   } catch (err) {
     console.error("❌ Error fetching bookings:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
-
 
 export const getStaffNotifications = async (req, res) => {
   try {
