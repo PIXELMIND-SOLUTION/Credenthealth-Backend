@@ -13322,21 +13322,30 @@ export const createBulkDiagnosticBookings = async (req, res) => {
       }
 
       const payableAmount = packageData.offerPrice || packageData.price;
-      let availablePackageBalance = staff.forPackages || 0;
+      
+      // ✅ Deduct from main wallet balance (staff.wallet_balance)
       let walletUsed = 0;
       let onlinePaymentUsed = 0;
+      const currentBalance = staff.wallet_balance || 0;
 
-      if (availablePackageBalance >= payableAmount) {
+      if (currentBalance >= payableAmount) {
         walletUsed = payableAmount;
-        staff.wallet_balance = (staff.wallet_balance || 0) - walletUsed;
-        staff.forPackages = (staff.forPackages || 0) - walletUsed;
+        staff.wallet_balance = currentBalance - walletUsed;
       } else {
-        walletUsed = availablePackageBalance;
+        walletUsed = currentBalance;
         onlinePaymentUsed = payableAmount - walletUsed;
-        staff.wallet_balance = (staff.wallet_balance || 0) - walletUsed;
+        staff.wallet_balance = 0;
+      }
+
+      // ✅ Also update package-specific wallet (for tracking, optional)
+      const currentPackageBalance = staff.forPackages || 0;
+      if (currentPackageBalance >= payableAmount) {
+        staff.forPackages = currentPackageBalance - payableAmount;
+      } else {
         staff.forPackages = 0;
       }
 
+      // Add wallet log
       if (walletUsed > 0) {
         staff.wallet_logs.push({
           type: "debit",
@@ -13353,7 +13362,7 @@ export const createBulkDiagnosticBookings = async (req, res) => {
       staff.markModified('forPackages');
       staff.markModified('wallet_logs');
 
-      // 🔥 Generate UNIQUE IDs for each booking using atomic counters
+      // Generate unique IDs
       const packageBookingId = await getNextPackageBookingId();
       const diagnosticBookingId = await getNextDiagnosticBookingId();
 
@@ -13460,114 +13469,163 @@ export const createBulkDiagnosticBookings = async (req, res) => {
     });
   }
 };
-// Helper to send email for a single bulk booking (identical to single booking email)
+// // Helper to send email for a single bulk booking (identical to single booking email)
+// async function sendBulkBookingEmail(staff, packageData, diagnostic, booking) {
+//   try {
+//     const { packageBookingId, diagnosticBookingId, date, timeSlot, serviceType, payableAmount } = booking;
+//     const walletUsed = staff.wallet_logs.find(log => log.from === "Bulk Package Booking" && log.forPackages > 0)?.forPackages || 0;
+//     const onlinePaymentUsed = payableAmount - walletUsed;
+
+//     let contactPersonInfo = "";
+//     if (diagnostic.contactPersons && diagnostic.contactPersons.length > 0) {
+//       const primaryContact = diagnostic.contactPersons[0];
+//       contactPersonInfo = `
+//         <div style="margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px;">
+//           <p style="margin: 5px 0;"><strong>📞 Primary Contact Person:</strong></p>
+//           <p style="margin: 5px 0;"><strong>Name:</strong> ${primaryContact.name || "N/A"}</p>
+//           <p style="margin: 5px 0;"><strong>Designation:</strong> ${primaryContact.designation || "N/A"}</p>
+//           <p style="margin: 5px 0;"><strong>Contact Number:</strong> ${primaryContact.contactNumber || "N/A"}</p>
+//           <p style="margin: 5px 0;"><strong>Contact Email:</strong> ${primaryContact.contactEmail || "N/A"}</p>
+//         </div>
+//       `;
+//     }
+
+//     let serviceAddress = "";
+//     if (serviceType === "Home Collection") {
+//       serviceAddress = `
+//         <p><strong>🏠 Home Collection Address:</strong></p>
+//         <p>${staff.address || "Address will be shared by the diagnostic center"}</p>
+//         <p><em>Our representative will visit this address for sample collection</em></p>
+//       `;
+//     } else {
+//       serviceAddress = `
+//         <p><strong>📍 Diagnostic Centre Address:</strong></p>
+//         <p><strong>Address:</strong> ${diagnostic.address || "Address not available"}</p>
+//         <p><strong>City:</strong> ${diagnostic.city || "N/A"}</p>
+//         <p><strong>State:</strong> ${diagnostic.state || "N/A"}</p>
+//         <p><strong>Pincode:</strong> ${diagnostic.pincode || "N/A"}</p>
+//         <p><em>Please visit the center at your scheduled time</em></p>
+//       `;
+//     }
+
+//     const mailOptions = {
+//       from: `"Credent Health" <${process.env.EMAIL}>`,
+//       to: staff.email,
+//       subject: `Package Booking Confirmed - ${packageBookingId}`,
+//       html: `
+//         <!DOCTYPE html>
+//         <html>
+//         <head>
+//           <meta charset="UTF-8">
+//           <meta name="viewport" content="width=device-width, initial-scale=1.0">
+//           <title>Package Booking Confirmation</title>
+//           <style>
+//             body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+//             .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; color: white; border-radius: 8px 8px 0 0; }
+//             .content { padding: 20px; background-color: #fff; }
+//             .section { background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid; }
+//             .booking-section { border-left-color: #3498db; }
+//             .package-section { border-left-color: #9b59b6; }
+//             .diagnostic-section { border-left-color: #2ecc71; }
+//             .address-section { border-left-color: #f39c12; }
+//             .user-section { border-left-color: #e74c3c; }
+//             .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 14px; }
+//             h1, h2, h3 { color: #2c3e50; }
+//             strong { color: #2c3e50; }
+//           </style>
+//         </head>
+//         <body>
+//           <div class="header">
+//             <h1 style="margin: 0; color: white;">Package Booking Confirmed!</h1>
+//           </div>
+          
+//           <div class="content">
+//             <p>Hello <strong>${staff.name}</strong>,</p>
+//             <p>Your health package booking (part of bulk booking) has been successfully confirmed. Here are the details:</p>
+            
+//             <div class="section booking-section">
+//               <h3 style="margin-top: 0;">📋 Booking Summary</h3>
+//               <p><strong>Package Booking ID:</strong> ${packageBookingId}</p>
+//               <p><strong>Diagnostic Booking ID:</strong> ${diagnosticBookingId}</p>
+//               <p><strong>Booking Date:</strong> ${moment(date).format('DD MMM YYYY')}</p>
+//               <p><strong>Time Slot:</strong> ${timeSlot || "Will be scheduled"}</p>
+//               <p><strong>Service Type:</strong> ${serviceType}</p>
+//               <p><strong>Package Amount:</strong> ₹${payableAmount}</p>
+//               <p><strong>Payment Mode:</strong> ${walletUsed > 0 ? 'Wallet' + (onlinePaymentUsed > 0 ? ' + Online' : '') : 'Online Payment'}</p>
+//               ${walletUsed > 0 ? `<p><strong>Wallet Used:</strong> ₹${walletUsed}</p>` : ''}
+//               ${onlinePaymentUsed > 0 ? `<p><strong>Online Payment:</strong> ₹${onlinePaymentUsed}</p>` : ''}
+//             </div>
+            
+//             <div class="section diagnostic-section">
+//               <h3 style="margin-top: 0;">🏥 Diagnostic Centre Details</h3>
+//               <p><strong>Centre Name:</strong> ${diagnostic.name}</p>
+//               <p><strong>Email:</strong> ${diagnostic.email}</p>
+//               <p><strong>Phone:</strong> ${diagnostic.phone}</p>
+//               ${contactPersonInfo}
+//             </div>
+            
+//             <div class="section address-section">
+//               <h3 style="margin-top: 0;">📍 Service Address</h3>
+//               ${serviceAddress}
+//             </div>
+
+//             <div class="footer">
+//               <p>For any assistance, contact support@credenthealth.com</p>
+//               <p>Thank you for choosing Credent Health!</p>
+//             </div>
+//           </div>
+//         </body>
+//         </html>
+//       `
+//     };
+
+//     await transporter.sendMail(mailOptions);
+//   } catch (err) {
+//     console.error(`Email sending failed for ${staff.email}:`, err);
+//   }
+// }
+
+
 async function sendBulkBookingEmail(staff, packageData, diagnostic, booking) {
   try {
     const { packageBookingId, diagnosticBookingId, date, timeSlot, serviceType, payableAmount } = booking;
-    const walletUsed = staff.wallet_logs.find(log => log.from === "Bulk Package Booking" && log.forPackages > 0)?.forPackages || 0;
-    const onlinePaymentUsed = payableAmount - walletUsed;
 
-    let contactPersonInfo = "";
-    if (diagnostic.contactPersons && diagnostic.contactPersons.length > 0) {
-      const primaryContact = diagnostic.contactPersons[0];
-      contactPersonInfo = `
-        <div style="margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px;">
-          <p style="margin: 5px 0;"><strong>📞 Primary Contact Person:</strong></p>
-          <p style="margin: 5px 0;"><strong>Name:</strong> ${primaryContact.name || "N/A"}</p>
-          <p style="margin: 5px 0;"><strong>Designation:</strong> ${primaryContact.designation || "N/A"}</p>
-          <p style="margin: 5px 0;"><strong>Contact Number:</strong> ${primaryContact.contactNumber || "N/A"}</p>
-          <p style="margin: 5px 0;"><strong>Contact Email:</strong> ${primaryContact.contactEmail || "N/A"}</p>
-        </div>
-      `;
-    }
+    // Determine test/package name (use package name)
+    const testName = packageData.name || "Health Package";
 
-    let serviceAddress = "";
+    let addressDetails = "";
     if (serviceType === "Home Collection") {
-      serviceAddress = `
-        <p><strong>🏠 Home Collection Address:</strong></p>
-        <p>${staff.address || "Address will be shared by the diagnostic center"}</p>
-        <p><em>Our representative will visit this address for sample collection</em></p>
-      `;
+      addressDetails = `Address: ${staff.address || "Address will be shared by the diagnostic center"}\n(Our representative will visit this address for sample collection)`;
     } else {
-      serviceAddress = `
-        <p><strong>📍 Diagnostic Centre Address:</strong></p>
-        <p><strong>Address:</strong> ${diagnostic.address || "Address not available"}</p>
-        <p><strong>City:</strong> ${diagnostic.city || "N/A"}</p>
-        <p><strong>State:</strong> ${diagnostic.state || "N/A"}</p>
-        <p><strong>Pincode:</strong> ${diagnostic.pincode || "N/A"}</p>
-        <p><em>Please visit the center at your scheduled time</em></p>
-      `;
+      addressDetails = `Centre Name: ${diagnostic.name || "N/A"}\nAddress: ${diagnostic.address || "Address not available"}\nCity: ${diagnostic.city || "N/A"}, State: ${diagnostic.state || "N/A"}, Pincode: ${diagnostic.pincode || "N/A"}`;
     }
+
+    const emailText = `
+Dear ${staff.name},
+
+Your diagnostic test has been successfully booked with Elthium Health.
+
+Booking Details:
+
+Booking ID: ${packageBookingId}
+Test/Package: ${testName}
+Date & Time: ${moment(date).format('DD MMM YYYY')} at ${timeSlot}
+Type: ${serviceType}
+${serviceType === "Home Collection" ? "Address:" : "Centre:"} ${addressDetails}
+
+Please ensure you follow any pre-test instructions provided.
+
+If you need assistance, feel free to contact us.
+
+Regards,
+Team Elthium Health
+    `;
 
     const mailOptions = {
       from: `"Credent Health" <${process.env.EMAIL}>`,
       to: staff.email,
       subject: `Package Booking Confirmed - ${packageBookingId}`,
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Package Booking Confirmation</title>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; color: white; border-radius: 8px 8px 0 0; }
-            .content { padding: 20px; background-color: #fff; }
-            .section { background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid; }
-            .booking-section { border-left-color: #3498db; }
-            .package-section { border-left-color: #9b59b6; }
-            .diagnostic-section { border-left-color: #2ecc71; }
-            .address-section { border-left-color: #f39c12; }
-            .user-section { border-left-color: #e74c3c; }
-            .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 14px; }
-            h1, h2, h3 { color: #2c3e50; }
-            strong { color: #2c3e50; }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <h1 style="margin: 0; color: white;">Package Booking Confirmed!</h1>
-          </div>
-          
-          <div class="content">
-            <p>Hello <strong>${staff.name}</strong>,</p>
-            <p>Your health package booking (part of bulk booking) has been successfully confirmed. Here are the details:</p>
-            
-            <div class="section booking-section">
-              <h3 style="margin-top: 0;">📋 Booking Summary</h3>
-              <p><strong>Package Booking ID:</strong> ${packageBookingId}</p>
-              <p><strong>Diagnostic Booking ID:</strong> ${diagnosticBookingId}</p>
-              <p><strong>Booking Date:</strong> ${moment(date).format('DD MMM YYYY')}</p>
-              <p><strong>Time Slot:</strong> ${timeSlot || "Will be scheduled"}</p>
-              <p><strong>Service Type:</strong> ${serviceType}</p>
-              <p><strong>Package Amount:</strong> ₹${payableAmount}</p>
-              <p><strong>Payment Mode:</strong> ${walletUsed > 0 ? 'Wallet' + (onlinePaymentUsed > 0 ? ' + Online' : '') : 'Online Payment'}</p>
-              ${walletUsed > 0 ? `<p><strong>Wallet Used:</strong> ₹${walletUsed}</p>` : ''}
-              ${onlinePaymentUsed > 0 ? `<p><strong>Online Payment:</strong> ₹${onlinePaymentUsed}</p>` : ''}
-            </div>
-            
-            <div class="section diagnostic-section">
-              <h3 style="margin-top: 0;">🏥 Diagnostic Centre Details</h3>
-              <p><strong>Centre Name:</strong> ${diagnostic.name}</p>
-              <p><strong>Email:</strong> ${diagnostic.email}</p>
-              <p><strong>Phone:</strong> ${diagnostic.phone}</p>
-              ${contactPersonInfo}
-            </div>
-            
-            <div class="section address-section">
-              <h3 style="margin-top: 0;">📍 Service Address</h3>
-              ${serviceAddress}
-            </div>
-
-            <div class="footer">
-              <p>For any assistance, contact support@credenthealth.com</p>
-              <p>Thank you for choosing Credent Health!</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `
+      text: emailText
     };
 
     await transporter.sendMail(mailOptions);

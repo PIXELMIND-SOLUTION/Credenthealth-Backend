@@ -2650,9 +2650,445 @@ const generatePackageBookingId = async () => {
 };
 
 
-// =======================
-// Create Booking from Staff Cart
-// =======================
+// // =======================
+// // Create Booking from Staff Cart
+// // =======================
+// export const createBookingFromStaffCart = async (req, res) => {
+//   try {
+//     const { staffId } = req.params;
+//     const {
+//       familyMemberId,
+//       diagnosticId,
+//       serviceType,
+//       date,
+//       timeSlot,
+//       transactionId,
+//       addressId
+//     } = req.body;
+
+//     console.log("=== STARTING BOOKING PROCESS ===");
+//     console.log("Staff ID:", staffId);
+//     console.log("Diagnostic ID:", diagnosticId);
+//     console.log("Service Type:", serviceType);
+
+//     // Validate service type
+//     if (!["Home Collection", "Center Visit"].includes(serviceType)) {
+//       return res.status(400).json({
+//         message: "Invalid service type",
+//         isSuccessfull: false
+//       });
+//     }
+
+//     // Safe date formatting for comparison
+//     const formattedDate = moment(date, [
+//       "YYYY-MM-DD",
+//       "DD/MM/YYYY",
+//       "MM/DD/YYYY"
+//     ]).isValid()
+//       ? moment(date, [
+//           "YYYY-MM-DD",
+//           "DD/MM/YYYY",
+//           "MM/DD/YYYY"
+//         ]).format("YYYY-MM-DD")
+//       : null;
+
+//     if (!formattedDate) {
+//       return res.status(400).json({
+//         message: "Invalid date format",
+//         isSuccessfull: false
+//       });
+//     }
+
+//     // Find staff
+//     const staff = await Staff.findById(staffId);
+//     if (!staff) {
+//       return res.status(404).json({
+//         message: "Staff not found",
+//         isSuccessfull: false
+//       });
+//     }
+
+//     // Find cart
+//     const staffCart = await Cart.findOne({ userId: staffId });
+//     if (!staffCart || !staffCart.items.length) {
+//       return res.status(404).json({
+//         message: "Cart is empty or not found for staff",
+//         isSuccessfull: false
+//       });
+//     }
+
+//     // ✅ CART ITEMS को बुकिंग के लिए सेव करें
+//     const cartItems = staffCart.items.map(item => ({
+//       itemId: item.itemId,
+//       type: item.type,
+//       title: item.title,
+//       quantity: item.quantity,
+//       price: item.price,
+//       offerPrice: item.offerPrice,
+//       totalPayable: item.totalPayable,
+//       totalPrice: item.totalPrice
+//     }));
+
+//     console.log("✅ Cart items extracted for booking:", cartItems.length);
+
+//     // Find diagnostic centre
+//     console.log("Fetching diagnostic with ID:", diagnosticId);
+//     const diagnostic = await Diagnostic.findById(diagnosticId);
+//     if (!diagnostic) {
+//       console.error("❌ Diagnostic not found for ID:", diagnosticId);
+//       return res.status(404).json({
+//         message: "Diagnostic centre not found",
+//         isSuccessfull: false
+//       });
+//     }
+
+//     // DEBUG: Check diagnostic data
+//     console.log("✅ Diagnostic found:");
+//     console.log("- Name:", diagnostic.name);
+//     console.log("- Email:", diagnostic.email);
+//     console.log("- Phone:", diagnostic.phone);
+
+//     // Calculate price from cart items
+//     const totalPrice = staffCart.items.reduce(
+//       (sum, item) => sum + (item.totalPrice || 0),
+//       0
+//     );
+//     const payableAmount = staffCart.payableAmount || totalPrice;
+
+//     console.log("Price calculated - Total:", totalPrice, "Payable:", payableAmount);
+
+//     // Wallet + Payment logic
+//     let walletUsed = 0;
+//     let onlinePaymentUsed = 0;
+//     let paymentStatus = null;
+//     let paymentDetails = null;
+//     const availableBalance = staff.forTests || 0;
+
+//     if (availableBalance >= payableAmount) {
+//       walletUsed = payableAmount;
+//       staff.wallet_balance -= walletUsed;
+//       staff.forTests -= walletUsed;
+//       console.log("Full payment from wallet:", walletUsed);
+//     } else {
+//       walletUsed = availableBalance;
+//       onlinePaymentUsed = payableAmount - availableBalance;
+//       staff.wallet_balance -= walletUsed;
+//       staff.forTests = 0;
+//       console.log("Partial wallet payment:", walletUsed, "Online:", onlinePaymentUsed);
+
+//       if (!transactionId) {
+//         return res.status(402).json({
+//           message:
+//             "Insufficient wallet balance. Please provide transactionId for online payment.",
+//           isSuccessfull: false,
+//           walletAvailable: availableBalance,
+//           requiredOnline: onlinePaymentUsed,
+//         });
+//       }
+
+//       // Razorpay capture
+//       let paymentInfo;
+//       try {
+//         paymentInfo = await razorpay.payments.fetch(transactionId);
+//       } catch (err) {
+//         return res.status(400).json({
+//           message: "Invalid transaction ID",
+//           isSuccessfull: false
+//         });
+//       }
+
+//       if (paymentInfo.status === "authorized") {
+//         try {
+//           await razorpay.payments.capture(
+//             transactionId,
+//             paymentInfo.amount,
+//             "INR"
+//           );
+//           paymentInfo = await razorpay.payments.fetch(transactionId);
+//         } catch (err) {
+//           return res.status(500).json({
+//             message: "Payment capture failed",
+//             isSuccessfull: false
+//           });
+//         }
+//       }
+
+//       if (paymentInfo.status !== "captured") {
+//         return res.status(400).json({
+//           message: `Payment not captured. Status: ${paymentInfo.status}`,
+//           isSuccessfull: false
+//         });
+//       }
+
+//       paymentStatus = paymentInfo.status;
+//       paymentDetails = paymentInfo;
+//     }
+
+//     // Wallet log
+//     if (walletUsed > 0) {
+//       staff.wallet_logs.push({
+//         type: "debit",
+//         forTests: walletUsed,
+//         forDoctors: 0,
+//         forPackages: 0,
+//         totalAmount: walletUsed,
+//         from: "Diagnostics Booking",
+//         date: new Date(),
+//       });
+//     }
+
+//     await staff.save();
+//     console.log("✅ Staff wallet updated");
+
+//     // Generate unique booking ID
+//     const diagnosticBookingId = await generateDiagnosticBookingId();
+//     console.log("Generated Booking ID:", diagnosticBookingId);
+
+//     // ✅ Create booking WITH CART ITEMS
+//     const booking = new Booking({
+//       staffId,
+//       familyMemberId,
+//       diagnosticId,
+//       // ✅ यहाँ cart items add करें
+//       items: cartItems,
+//       serviceType,
+//       date: formattedDate, // Use the already formatted date
+//       timeSlot,
+//       cartId: staffCart._id,
+//       totalPrice,
+//       couponCode: staffCart.couponCode || null,
+//       discount: staffCart.discount || 0,
+//       payableAmount,
+//       status: "Confirmed",
+//       diagnosticBookingId,
+//       transactionId: transactionId || null,
+//       paymentStatus,
+//       paymentDetails,
+//       isSuccessfull: true,
+//       addressId: serviceType === "Home Collection" ? addressId : null
+//     });
+
+//     const savedBooking = await booking.save();
+//     console.log("✅ Booking saved to DB with ID:", savedBooking._id);
+//     console.log("✅ Items stored in booking:", savedBooking.items.length);
+
+//     // Mark diagnostic slot as booked
+//     let updated = false;
+//     const updateSlots = (slots) =>
+//       slots.map(slot => {
+//         if (
+//           slot.date === formattedDate &&
+//           slot.timeSlot === timeSlot &&
+//           !slot.isBooked
+//         ) {
+//           slot.isBooked = true;
+//           updated = true;
+//         }
+//         return slot;
+//       });
+
+//     if (serviceType === "Home Collection") {
+//       diagnostic.homeCollectionSlots = updateSlots(diagnostic.homeCollectionSlots);
+//     } else if (serviceType === "Center Visit") {
+//       diagnostic.centerVisitSlots = updateSlots(diagnostic.centerVisitSlots);
+//     }
+
+//     if (updated) {
+//       await diagnostic.save();
+//       console.log("✅ Diagnostic slots updated");
+//     }
+
+//     // ✅ CART को CLEAR करें (Optional)
+//     // staffCart.items = [];
+//     // await staffCart.save();
+//     // console.log("✅ Cart cleared after booking");
+
+//     // Notification
+//     staff.notifications.push({
+//       title: "Diagnostics Booking Confirmed",
+//       message: `Your diagnostic booking for ${formattedDate} at ${timeSlot} has been confirmed.`,
+//       timestamp: new Date(),
+//       bookingId: savedBooking._id,
+//     });
+//     await staff.save();
+//     console.log("✅ Notification added to staff");
+
+//     // Get primary contact person details
+//     let contactPersonInfo = "";
+//     let primaryContact = null;
+    
+//     if (diagnostic.contactPersons && diagnostic.contactPersons.length > 0) {
+//       primaryContact = diagnostic.contactPersons[0];
+//       console.log("✅ Contact person found:", primaryContact.name);
+      
+//       contactPersonInfo = `
+//         <div style="margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px;">
+//           <p style="margin: 5px 0;"><strong>📞 Primary Contact Person:</strong></p>
+//           <p style="margin: 5px 0;"><strong>Name:</strong> ${primaryContact.name || "N/A"}</p>
+//           <p style="margin: 5px 0;"><strong>Designation:</strong> ${primaryContact.designation || "N/A"}</p>
+//           <p style="margin: 5px 0;"><strong>Contact Number:</strong> ${primaryContact.contactNumber || "N/A"}</p>
+//           <p style="margin: 5px 0;"><strong>Contact Email:</strong> ${primaryContact.contactEmail || "N/A"}</p>
+//         </div>
+//       `;
+//     } else {
+//       console.log("⚠️ No contact persons found for diagnostic");
+//     }
+
+//     // Get address based on service type
+//     let serviceAddress = "";
+//     if (serviceType === "Home Collection") {
+//       serviceAddress = `
+//         <p><strong>🏠 Home Collection Address:</strong></p>
+//         <p>${staff.address || "Address will be shared by the diagnostic center"}</p>
+//         <p><em>Our representative will visit this address for sample collection</em></p>
+//       `;
+//     } else {
+//       serviceAddress = `
+//         <p><strong>📍 Diagnostic Centre Address:</strong></p>
+//         <p><strong>Address:</strong> ${diagnostic.address || "Address not available"}</p>
+//         <p><strong>City:</strong> ${diagnostic.city || "N/A"}</p>
+//         <p><strong>State:</strong> ${diagnostic.state || "N/A"}</p>
+//         <p><strong>Pincode:</strong> ${diagnostic.pincode || "N/A"}</p>
+//         <p><em>Please visit the center at your scheduled time</em></p>
+//       `;
+//     }
+
+//     // ✅ Email में items details भी add करें
+//     const itemsListHtml = savedBooking.items.map(item => `
+//       <tr>
+//         <td style="padding: 8px; border: 1px solid #ddd;">${item.title}</td>
+//         <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${item.quantity}</td>
+//         <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₹${item.price}</td>
+//         <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₹${item.totalPrice}</td>
+//       </tr>
+//     `).join('');
+
+//     const emailHtml = `
+//       <!DOCTYPE html>
+//       <html>
+//       <head>
+//         <meta charset="UTF-8">
+//         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+//         <title>Booking Confirmation - Credent Health</title>
+//         <style>
+//           body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+//           .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; color: white; border-radius: 8px 8px 0 0; }
+//           .content { padding: 20px; background-color: #fff; }
+//           .section { background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid; }
+//           .booking-section { border-left-color: #3498db; }
+//           .items-section { border-left-color: #1abc9c; }
+//           .diagnostic-section { border-left-color: #2ecc71; }
+//           .address-section { border-left-color: #9b59b6; }
+//           table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+//           th { background-color: #f2f2f2; padding: 10px; text-align: left; border: 1px solid #ddd; }
+//           td { padding: 8px; border: 1px solid #ddd; }
+//           .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 14px; }
+//         </style>
+//       </head>
+//       <body>
+//         <div class="header">
+//           <h1 style="margin: 0; color: white;">Diagnostics Booking Confirmed!</h1>
+//         </div>
+        
+//         <div class="content">
+//           <p>Hello <strong>${staff.name}</strong>,</p>
+//           <p>Your diagnostic booking has been successfully confirmed. Here are the complete details:</p>
+          
+//           <!-- Booking Summary -->
+//           <div class="section booking-section">
+//             <h3 style="margin-top: 0;">📋 Booking Summary</h3>
+//             <p><strong>Booking ID:</strong> ${diagnosticBookingId}</p>
+//             <p><strong>Booking Date:</strong> ${moment(formattedDate).format('DD MMM YYYY')}</p>
+//             <p><strong>Time Slot:</strong> ${timeSlot}</p>
+//             <p><strong>Service Type:</strong> ${serviceType}</p>
+//             <p><strong>Total Amount:</strong> ₹${totalPrice}</p>
+//             ${staffCart.discount ? `<p><strong>Discount Applied:</strong> ₹${staffCart.discount}</p>` : ''}
+//             <p><strong>Paid Amount:</strong> ₹${payableAmount}</p>
+//           </div>
+          
+//           <!-- Items Details -->
+//           <div class="section items-section">
+//             <h3 style="margin-top: 0;">🛒 Items Booked</h3>
+//             <table>
+//               <thead>
+//                 <tr>
+//                   <th>Item Name</th>
+//                   <th>Quantity</th>
+//                   <th>Price</th>
+//                   <th>Total</th>
+//                 </tr>
+//               </thead>
+//               <tbody>
+//                 ${itemsListHtml}
+//               </tbody>
+//               <tfoot>
+//                 <tr>
+//                   <td colspan="3" style="text-align: right; font-weight: bold;">Grand Total:</td>
+//                   <td style="font-weight: bold;">₹${totalPrice}</td>
+//                 </tr>
+//               </tfoot>
+//             </table>
+//           </div>
+          
+//           <!-- Diagnostic Centre Details -->
+//           <div class="section diagnostic-section">
+//             <h3 style="margin-top: 0;">🏥 Diagnostic Centre Details</h3>
+//             <p><strong>Centre Name:</strong> ${diagnostic.name || "Neuberg Anand"}</p>
+//             <p><strong>Centre Email:</strong> ${diagnostic.email || "credenthealth@gmail.com"}</p>
+//             <p><strong>Centre Phone:</strong> ${diagnostic.phone || "7619196856"}</p>
+//             ${contactPersonInfo}
+//           </div>
+          
+//           <div class="footer">
+//             <p>For any assistance with this booking, contact our support team at support@credenthealth.com</p>
+//             <p>Thank you for choosing Credent Health!</p>
+//             <p><strong>Team CredentHealth</strong></p>
+//           </div>
+//         </div>
+//       </body>
+//       </html>
+//     `;
+
+//     // Email
+//     const mailOptions = {
+//       from: `"Credent Health" <${process.env.EMAIL}>`,
+//       to: staff.email,
+//       subject: `Diagnostics Booking Confirmed - ${diagnosticBookingId}`,
+//       html: emailHtml
+//     };
+
+//     try {
+//       await transporter.sendMail(mailOptions);
+//       console.log("✅ EMAIL SENT SUCCESSFULLY to:", staff.email);
+//     } catch (err) {
+//       console.error("❌ Email sending failed:", err);
+//     }
+
+//     return res.status(201).json({
+//       message: "Booking created successfully with items stored.",
+//       isSuccessfull: true,
+//       diagnosticBookingId,
+//       walletUsed,
+//       onlinePaymentUsed,
+//       walletBalance: staff.wallet_balance,
+//       forTestsBalance: staff.forTests,
+//       booking: savedBooking,
+//       itemsCount: savedBooking.items.length
+//     });
+
+//   } catch (err) {
+//     console.error("❌ Error creating booking:", err);
+//     console.error("Error stack:", err.stack);
+//     res.status(500).json({
+//       message: "Server error",
+//       isSuccessfull: false,
+//       error: err.message
+//     });
+//   }
+// };
+
+
+
 export const createBookingFromStaffCart = async (req, res) => {
   try {
     const { staffId } = req.params;
@@ -2849,10 +3285,9 @@ export const createBookingFromStaffCart = async (req, res) => {
       staffId,
       familyMemberId,
       diagnosticId,
-      // ✅ यहाँ cart items add करें
       items: cartItems,
       serviceType,
-      date: formattedDate, // Use the already formatted date
+      date: formattedDate,
       timeSlot,
       cartId: staffCart._id,
       totalPrice,
@@ -2898,11 +3333,6 @@ export const createBookingFromStaffCart = async (req, res) => {
       console.log("✅ Diagnostic slots updated");
     }
 
-    // ✅ CART को CLEAR करें (Optional)
-    // staffCart.items = [];
-    // await staffCart.save();
-    // console.log("✅ Cart cleared after booking");
-
     // Notification
     staff.notifications.push({
       title: "Diagnostics Booking Confirmed",
@@ -2913,148 +3343,55 @@ export const createBookingFromStaffCart = async (req, res) => {
     await staff.save();
     console.log("✅ Notification added to staff");
 
-    // Get primary contact person details
+    // Get primary contact person details (for diagnostic centre)
     let contactPersonInfo = "";
     let primaryContact = null;
-    
     if (diagnostic.contactPersons && diagnostic.contactPersons.length > 0) {
       primaryContact = diagnostic.contactPersons[0];
-      console.log("✅ Contact person found:", primaryContact.name);
-      
-      contactPersonInfo = `
-        <div style="margin-top: 10px; padding: 10px; background-color: #f0f8ff; border-radius: 5px;">
-          <p style="margin: 5px 0;"><strong>📞 Primary Contact Person:</strong></p>
-          <p style="margin: 5px 0;"><strong>Name:</strong> ${primaryContact.name || "N/A"}</p>
-          <p style="margin: 5px 0;"><strong>Designation:</strong> ${primaryContact.designation || "N/A"}</p>
-          <p style="margin: 5px 0;"><strong>Contact Number:</strong> ${primaryContact.contactNumber || "N/A"}</p>
-          <p style="margin: 5px 0;"><strong>Contact Email:</strong> ${primaryContact.contactEmail || "N/A"}</p>
-        </div>
-      `;
-    } else {
-      console.log("⚠️ No contact persons found for diagnostic");
+      contactPersonInfo = `Primary Contact: ${primaryContact.name || "N/A"} (${primaryContact.designation || ""}) - ${primaryContact.contactNumber || "N/A"}`;
     }
 
-    // Get address based on service type
-    let serviceAddress = "";
+    // Build items list string for email (simple format)
+    const itemsListText = savedBooking.items.map(item => 
+      `- ${item.title} x${item.quantity}: ₹${item.totalPrice}`
+    ).join('\n');
+
+    // Determine address/centre details for email
+    let addressDetails = "";
     if (serviceType === "Home Collection") {
-      serviceAddress = `
-        <p><strong>🏠 Home Collection Address:</strong></p>
-        <p>${staff.address || "Address will be shared by the diagnostic center"}</p>
-        <p><em>Our representative will visit this address for sample collection</em></p>
-      `;
+      addressDetails = `Address: ${staff.address || "Address will be shared by the diagnostic center"}\n(Our representative will visit this address for sample collection)`;
     } else {
-      serviceAddress = `
-        <p><strong>📍 Diagnostic Centre Address:</strong></p>
-        <p><strong>Address:</strong> ${diagnostic.address || "Address not available"}</p>
-        <p><strong>City:</strong> ${diagnostic.city || "N/A"}</p>
-        <p><strong>State:</strong> ${diagnostic.state || "N/A"}</p>
-        <p><strong>Pincode:</strong> ${diagnostic.pincode || "N/A"}</p>
-        <p><em>Please visit the center at your scheduled time</em></p>
-      `;
+      addressDetails = `Centre Name: ${diagnostic.name || "N/A"}\nAddress: ${diagnostic.address || "Address not available"}\nCity: ${diagnostic.city || "N/A"}, State: ${diagnostic.state || "N/A"}, Pincode: ${diagnostic.pincode || "N/A"}`;
     }
 
-    // ✅ Email में items details भी add करें
-    const itemsListHtml = savedBooking.items.map(item => `
-      <tr>
-        <td style="padding: 8px; border: 1px solid #ddd;">${item.title}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${item.quantity}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₹${item.price}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₹${item.totalPrice}</td>
-      </tr>
-    `).join('');
+    // === NEW SIMPLE EMAIL FORMAT ===
+    const emailText = `
+Dear ${staff.name},
 
-    const emailHtml = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Booking Confirmation - Credent Health</title>
-        <style>
-          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; color: white; border-radius: 8px 8px 0 0; }
-          .content { padding: 20px; background-color: #fff; }
-          .section { background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid; }
-          .booking-section { border-left-color: #3498db; }
-          .items-section { border-left-color: #1abc9c; }
-          .diagnostic-section { border-left-color: #2ecc71; }
-          .address-section { border-left-color: #9b59b6; }
-          table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-          th { background-color: #f2f2f2; padding: 10px; text-align: left; border: 1px solid #ddd; }
-          td { padding: 8px; border: 1px solid #ddd; }
-          .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 14px; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1 style="margin: 0; color: white;">Diagnostics Booking Confirmed!</h1>
-        </div>
-        
-        <div class="content">
-          <p>Hello <strong>${staff.name}</strong>,</p>
-          <p>Your diagnostic booking has been successfully confirmed. Here are the complete details:</p>
-          
-          <!-- Booking Summary -->
-          <div class="section booking-section">
-            <h3 style="margin-top: 0;">📋 Booking Summary</h3>
-            <p><strong>Booking ID:</strong> ${diagnosticBookingId}</p>
-            <p><strong>Booking Date:</strong> ${moment(formattedDate).format('DD MMM YYYY')}</p>
-            <p><strong>Time Slot:</strong> ${timeSlot}</p>
-            <p><strong>Service Type:</strong> ${serviceType}</p>
-            <p><strong>Total Amount:</strong> ₹${totalPrice}</p>
-            ${staffCart.discount ? `<p><strong>Discount Applied:</strong> ₹${staffCart.discount}</p>` : ''}
-            <p><strong>Paid Amount:</strong> ₹${payableAmount}</p>
-          </div>
-          
-          <!-- Items Details -->
-          <div class="section items-section">
-            <h3 style="margin-top: 0;">🛒 Items Booked</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>Item Name</th>
-                  <th>Quantity</th>
-                  <th>Price</th>
-                  <th>Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${itemsListHtml}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td colspan="3" style="text-align: right; font-weight: bold;">Grand Total:</td>
-                  <td style="font-weight: bold;">₹${totalPrice}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-          
-          <!-- Diagnostic Centre Details -->
-          <div class="section diagnostic-section">
-            <h3 style="margin-top: 0;">🏥 Diagnostic Centre Details</h3>
-            <p><strong>Centre Name:</strong> ${diagnostic.name || "Neuberg Anand"}</p>
-            <p><strong>Centre Email:</strong> ${diagnostic.email || "credenthealth@gmail.com"}</p>
-            <p><strong>Centre Phone:</strong> ${diagnostic.phone || "7619196856"}</p>
-            ${contactPersonInfo}
-          </div>
-          
-          <div class="footer">
-            <p>For any assistance with this booking, contact our support team at support@credenthealth.com</p>
-            <p>Thank you for choosing Credent Health!</p>
-            <p><strong>Team CredentHealth</strong></p>
-          </div>
-        </div>
-      </body>
-      </html>
+Your diagnostic test has been successfully booked with Elthium Health.
+
+Booking Details:
+
+Booking ID: ${diagnosticBookingId}
+Test/Package: 
+${itemsListText}
+Date & Time: ${moment(formattedDate).format('DD MMM YYYY')} at ${timeSlot}
+Type: ${serviceType}
+${serviceType === "Home Collection" ? "Address:" : "Centre:"} ${addressDetails}
+
+Please ensure you follow any pre-test instructions provided.
+
+If you need assistance, feel free to contact us.
+
+Regards,
+Team Elthium Health
     `;
 
-    // Email
     const mailOptions = {
-      from: `"Credent Health" <${process.env.EMAIL}>`,
+      from: `"Elthium Health" <${process.env.EMAIL}>`,
       to: staff.email,
       subject: `Diagnostics Booking Confirmed - ${diagnosticBookingId}`,
-      html: emailHtml
+      text: emailText  // plain text email
     };
 
     try {
@@ -3086,6 +3423,8 @@ export const createBookingFromStaffCart = async (req, res) => {
     });
   }
 };
+
+
 export const rescheduleDiagnosticBooking = async (req, res) => {
   try {
     const { staffId, bookingId } = req.params;
@@ -4743,7 +5082,7 @@ export const rescheduleDoctorConsultation = async (req, res) => {
     booking.day = newDay;
     booking.date = parsedNewDate;
     booking.timeSlot = newTimeSlot;
-    booking.status = "Rescheduled"; // ✅ Update status
+    booking.status = "Rescheduled";
     booking.bookedSlot = {
       day: newDay,
       date: parsedNewDate,
@@ -4764,34 +5103,50 @@ export const rescheduleDoctorConsultation = async (req, res) => {
       });
       await staff.save();
 
-      // Send email
-     // Send email
-const mailOptions = {
-  from: `"Credent Health" <${process.env.EMAIL}>`,
-  to: staff.email,
-  subject: "Your Doctor Consultation has been Rescheduled",
-  html: `
-    <h2>Consultation Rescheduled</h2>
-    <p>Hello ${staff.name},</p>
-    <p>Your consultation with <strong>Dr. ${doctor.name}</strong> has been rescheduled.</p>
-    <p><strong>Booking ID:</strong> ${booking.doctorConsultationBookingId}</p>
-    <p><strong>New Date:</strong> ${newDateStr}</p>
-    <p><strong>New Time Slot:</strong> ${newTimeSlot}</p>
-    <p><strong>Consultation Type:</strong> ${booking.type}</p>
-    <p><strong>Staff Email:</strong> ${staff.email}</p>
-    <p><strong>Employee ID:</strong> ${staff.employeeId || "N/A"}</p>
-    <br>
-    <p>Thank you,<br>Team CredentHealth</p>
-  `
-};
+      // ======================
+      // 📧 NEW EMAIL FORMAT (plain text)
+      // ======================
+      const serviceName = `Doctor Consultation - Dr. ${doctor.name}`;
+      let location = "";
+      if (booking.type === "Online") {
+        location = "Online (Video Call)";
+      } else {
+        location = "Clinic Visit";
+      }
 
-try {
-  await transporter.sendMail(mailOptions);
-  console.log("✅ Reschedule email sent to:", staff.email);
-} catch (err) {
-  console.error("❌ Email sending failed:", err);
-}
+      const emailText = `
+Dear ${staff.name},
 
+Your appointment has been successfully rescheduled.
+
+Updated Appointment Details:
+
+Booking ID: ${booking.doctorConsultationBookingId || booking._id}
+Service: ${serviceName}
+New Date & Time: ${newDateStr} at ${newTimeSlot}
+Location: ${location}
+
+Please ensure you are available at the updated time.
+
+If you need any further assistance, feel free to contact us.
+
+Regards,
+Team Elthium Health
+      `;
+
+      const mailOptions = {
+        from: `"Credent Health" <${process.env.EMAIL}>`,
+        to: staff.email,
+        subject: "Your Appointment has been Rescheduled",
+        text: emailText
+      };
+
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log("✅ Reschedule email sent to:", staff.email);
+      } catch (err) {
+        console.error("❌ Email sending failed:", err);
+      }
     }
 
     res.status(200).json({
@@ -4809,7 +5164,6 @@ try {
     });
   }
 };
-
 
 
 export const verifyEmail = async (req, res) => {
@@ -5916,38 +6270,68 @@ export const createSupportTicket = async (req, res) => {
     await newTicket.save();
 
     // =========================
-    // 📧 EMAIL TO SUPPORT TEAM
+    // 📧 EMAIL TO STAFF (USER)
     // =========================
+    const staffEmailBody = `
+Hi ${staff.name || "User"} (${staff.employeeId || staff._id}),
 
-    const mailOptions = {
+Thanks for contacting Elthium Health!
+
+We've received your request and our team is currently looking into it. We'll get back to you as soon as possible.
+
+Ticket ID: ${newTicket._id}
+
+If you have any additional details to share, feel free to reply to this email.
+
+Best regards,
+Elthium Health Support Team
+    `;
+
+    const staffMailOptions = {
       from: process.env.EMAIL,
-      to: "Support@credenthealth.com",
-      subject: `New Support Ticket - ${reason}`,
-
-      html: `
-        <div style="font-family:Arial;padding:20px;">
-          <h2>New Support Ticket Received</h2>
-
-          <h3>👤 Staff Details</h3>
-          <p><b>Name:</b> ${staff.name || "N/A"}</p>
-          <p><b>Email:</b> ${staff.email || "N/A"}</p>
-          <p><b>Contact:</b> ${staff.contact_number || "N/A"}</p>
-
-          <h3>🎫 Ticket Details</h3>
-          <p><b>Reason:</b> ${reason}</p>
-          <p><b>Description:</b> ${description}</p>
-
-          ${filePath ? `<p><b>Attachment:</b> ${filePath}</p>` : ""}
-
-          <hr/>
-          <p>Ticket ID: ${newTicket._id}</p>
-        </div>
-      `,
+      to: staff.email,
+      subject: `Your support request has been received (Ticket: ${newTicket._id})`,
+      text: staffEmailBody,
     };
 
-    await transporter.sendMail(mailOptions);
+    // =========================
+    // 📧 EMAIL TO SUPPORT TEAM
+    // =========================
+    const supportEmailBody = `
+Hello Team,
 
-    console.log("📧 Support email sent");
+A new support ticket has been raised on the Elthium Health platform.
+
+Ticket Details:
+
+Ticket ID: ${newTicket._id}
+User Name: ${staff.name || "N/A"} (${staff.employeeId || staff._id})
+Contact: ${staff.contact_number || "N/A"} / ${staff.email || "N/A"}
+Category: ${reason}
+Subject: ${reason}
+Description:
+${description}
+
+${filePath ? `Attachment: ${filePath}` : ""}
+
+Please review and take the necessary action at the earliest.
+
+Regards,
+Elthium Health System
+    `;
+
+    const supportMailOptions = {
+      from: process.env.EMAIL,
+      to: "Support@credenthealth.com",
+      subject: "A new support request requires your attention",
+      text: supportEmailBody,
+    };
+
+    await transporter.sendMail(staffMailOptions);
+    await transporter.sendMail(supportMailOptions);
+
+    console.log("📧 Support acknowledgement email sent to staff");
+    console.log("📧 Support ticket notification sent to internal team");
 
     return res.status(201).json({
       message: "Support ticket created successfully.",

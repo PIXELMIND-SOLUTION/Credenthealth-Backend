@@ -44,19 +44,10 @@ const server = http.createServer(app);
 // ✅ Allowlisted CORS origins
 const allowedOrigins = [
   'http://localhost:3000',
-  'https://credenthealthadmin.vercel.app',
-  'https://credenthealthadmin-j1y3.vercel.app',
-  'http://194.164.148.244:3032',
-  'http://31.97.206.144:3004',
-  'http://31.97.206.144:3041',
   'http://localhost:3001',
-  'https://credenthealthdeleteurl.vercel.app',
-  'http://31.97.206.144:3593',
-  'https://credenthealth.com',
-  'https://healthcare-sage-six.vercel.app',
   'http://31.97.228.17:3001',
-  'http://panel.credenthealth.com',
-  'https://panel.credenthealth.com'
+  'https://elthiumhealth.com',
+  'https://panel.elthiumhealth.com'
 ];
 
 // ✅ Socket.IO setup
