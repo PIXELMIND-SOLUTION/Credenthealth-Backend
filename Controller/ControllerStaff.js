@@ -4631,31 +4631,41 @@ export const cancelBooking = async (req, res) => {
     const { staffId, bookingId } = req.params;
     const { status } = req.body;
 
-    // Ensure the provided status is 'Cancelled'
     if (status !== "Cancelled") {
       return res.status(400).json({ message: "Invalid status. Only 'Cancelled' status is allowed." });
     }
 
-    // Find the booking by staffId and bookingId
     const booking = await Booking.findOne({ staffId, _id: bookingId });
 
     if (!booking) {
       return res.status(404).json({ message: "Booking not found" });
     }
 
-    // Update the status of the booking to 'Cancelled'
-    booking.status = "Cancelled";
+    // 🔥 Find staff user
+    const staff = await User.findById(staffId);
+    if (!staff) {
+      return res.status(404).json({ message: "Staff not found" });
+    }
 
-    // Save the updated booking
+    // 💰 Add booking price to wallet
+    const totalPrice = booking.totalPrice || 0;
+
+    staff.wallet_balance = (staff.wallet_balance || 0) + totalPrice;
+    await staff.save();
+
+    // ❌ Cancel booking
+    booking.status = "Cancelled";
     const updatedBooking = await booking.save();
 
-    res.status(200).json({
-      message: "Booking successfully cancelled.",
-      booking: updatedBooking
+    return res.status(200).json({
+      message: "Booking successfully cancelled and wallet updated.",
+      booking: updatedBooking,
+      wallet_balance: staff.wallet_balance
     });
+
   } catch (err) {
     console.error("❌ Error cancelling booking:", err);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
